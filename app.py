@@ -18,6 +18,8 @@ except Exception:
 
 from utils.prob import american_to_prob
 
+from utils.price_source import resolve_shop_price
+
 app = Flask(__name__, static_url_path="", static_folder="static")
 
 @app.get("/")
@@ -145,4 +147,24 @@ def evaluate():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
+    @app.post("/api/evaluate")
+def evaluate():
+    j = request.get_json() or {}
+    league = j.get("league")
+    prop   = j.get("prop")
+    american = j.get("american")
+
+    # 1) If user didn't give a price, try to auto-fill ONE price via odds api (on-demand).
+    if american in (None, ""):
+        american = resolve_shop_price(
+            league=league,
+            prop=prop,
+            player_name=j.get("player_name"),
+            player_id=j.get("player_id"),
+        )
+
+    p_break_even = american_to_prob(american) if american not in (None, "") else None
+
+    # ... keep your trend code exactly as you have it ...
+    # (compute p_trend from MLB or NFL trends, then tag)
 
