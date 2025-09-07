@@ -1,0 +1,32 @@
+<!doctype html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mora Bets Lite</title>
+<style>
+  body{font-family:system-ui,Arial;margin:20px;max-width:800px}
+  .card{border:1px solid #ddd;border-radius:14px;padding:16px;margin:12px 0}
+  input,select,button{padding:10px;border-radius:10px;border:1px solid #ccc}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+</style>
+</head><body>
+  <h1>Mora Bets Lite</h1>
+  <div class="card">
+    <div class="row">
+      <select id="league">
+        <option value="mlb">MLB</option>
+        <option value="nfl">NFL</option>
+      </select>
+      <select id="prop">
+        <option value="HITS_0_5">MLB: Over 0.5 Hits</option>
+        <option value="TB_1_5">MLB: Over 1.5 Total Bases</option>
+        <option value="REC_3_5">NFL: Over 3.5 Receptions</option>
+        <option value="RUSH_49_5">NFL: Over 49.5 Rush Yards</option>
+      </select>
+      <input id="player" placeholder="Player (MLB: search; NFL: full name)"/>
+      <input id="american" placeholder="American price (optional e.g. -120)"/>
+      <button id="eval">Evaluate</button>
+    </div>
+    <p id="help">MLB: type 3+ letters to search and pick a player. NFL: type the exact name from your CSV.</p>
+    <div id="result"></div>
+  </div>
+<script src="app.js"></script>
+</body></html>
