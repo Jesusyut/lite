@@ -1,4 +1,3 @@
-# services/nfl_apisports.py
 import os, requests
 from utils.rcache import cached_fetch
 
@@ -23,24 +22,30 @@ def _request(path, params=None):
     return resp.json()
 
 def _get(path, params=None, ttl=3600):
+    # Cached with daily call budget in utils/rcache
     return cached_fetch("apisports", path, params, lambda: _request(path, params), ttl=ttl)
 
 def search_player(name: str):
-    # Adjust path/params to match the exact API-Sports NFL route you’re using
-    return _get("/players", {"search": name}, ttl=12*3600)  # 12h cache
+    # Adjust the path/params if your API-Sports plan uses a different route
+    return _get("/players", {"search": name}, ttl=12*3600)
 
 def player_last5_trends(player_id: int, season: int):
     js = _get("/players/statistics", {"player": player_id, "season": season}, ttl=6*3600)
-    # Normalize your last-5 logic against their payload
-    splits = (js.get("response") or [])[:5]
+    splits = js.get("response") or []
+    splits = splits[:5]  # recent 5
     if not splits:
         return {"n": 0}
-    def as_int(x): 
+    def as_int(x):
         try: return int(x)
         except: return 0
-    # Example thresholds—you can tune:
-    rec_hits  = sum(1 for s in splits if as_int(s.get("receptions", 0)) >= 4)
-    rush_hits = sum(1 for s in splits if s.get("type") == "rushing" and as_int(s.get("yards", 0)) >= 50)
+    rec_hits  = 0
+    rush_hits = 0
+    for s in splits:
+        # keys may vary by collection; adapt to your payload
+        rec = as_int(s.get("receptions", s.get("receiving",{}).get("receptions", 0)))
+        ry  = as_int(s.get("rushing",{}).get("yards", s.get("rushYds", 0)))
+        rec_hits  += 1 if rec >= 4 else 0
+        rush_hits += 1 if ry  >= 50 else 0
     n = len(splits)
     return {
         "n": n,
@@ -48,3 +53,4 @@ def player_last5_trends(player_id: int, season: int):
         "rush_over49_rate": round(100.0 * rush_hits / n, 1),
         "raw": splits,
     }
+
