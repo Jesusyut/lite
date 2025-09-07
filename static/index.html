@@ -1,6 +1,3 @@
-<!doctype html><html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Mora Bets Lite</title>
 <!doctype html>
 <html>
 <head>
@@ -29,20 +26,13 @@
     .under{color:var(--amber)}
     .tiny-link{display:inline-flex;align-items:center;gap:6px;color:#9dd0ff;font-size:12px;cursor:pointer;text-decoration:none;border-bottom:1px dashed #2b3245}
     .tiny-link:hover{color:#cfe6ff}
-
     .edge-badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#1e9d59;color:#fff;margin-left:8px;line-height:18px;user-select:none}
-
-    /* Hide market tabs (defensive) */
     #market-tabs{display:none !important;}
-
-    /* big loading overlay */
     .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
       background:rgba(10,14,24,.85);backdrop-filter:saturate(140%) blur(2px);
       z-index:10;flex-direction:column;text-align:center;padding:24px}
     .spinner{width:44px;height:44px;border:3px solid #2b3245;border-top-color:#9dd0ff;border-radius:50%;animation:spin .9s linear infinite;margin-bottom:12px}
     @keyframes spin{to{transform:rotate(360deg)}}
-
-    /* AI Scout Modal Styles (kept for future use) */
     .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999}
     .modal.hidden{display:none}
     .modal-inner{background:#121317;border:1px solid #2a2d36;border-radius:14px;min-width:720px;max-width:1020px;max-height:80vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.5)}
@@ -87,9 +77,7 @@
     <!-- Toolbar -->
     <div class="toolbar">
       <input id="player" class="search" placeholder="Search MLB player (type 3+ chars) or enter NFL player exact name"/>
-      <select id="prop" class="search" style="max-width:240px">
-        <!-- options filled by JS based on league -->
-      </select>
+      <select id="prop" class="search" style="max-width:240px"></select>
       <input id="american" class="search" placeholder="American price (optional e.g. -120)" style="max-width:180px"/>
       <button id="evalBtn" class="tab">Evaluate</button>
       <span id="hint" class="muted small">Tip: If price is empty, we'll try to auto-fill from your odds feed.</span>
@@ -103,26 +91,3 @@
 </body>
 </html>
 
-</head><body>
-  <h1>Mora Bets Lite</h1>
-  <div class="card">
-    <div class="row">
-      <select id="league">
-        <option value="mlb">MLB</option>
-        <option value="nfl">NFL</option>
-      </select>
-      <select id="prop">
-        <option value="HITS_0_5">MLB: Over 0.5 Hits</option>
-        <option value="TB_1_5">MLB: Over 1.5 Total Bases</option>
-        <option value="REC_3_5">NFL: Over 3.5 Receptions</option>
-        <option value="RUSH_49_5">NFL: Over 49.5 Rush Yards</option>
-      </select>
-      <input id="player" placeholder="Player (MLB: search; NFL: full name)"/>
-      <input id="american" placeholder="American price (optional e.g. -120)"/>
-      <button id="eval">Evaluate</button>
-    </div>
-    <p id="help">MLB: type 3+ letters to search and pick a player. NFL: type the exact name from your CSV.</p>
-    <div id="result"></div>
-  </div>
-<script src="app.js"></script>
-</body></html>
