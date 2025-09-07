@@ -1,12 +1,108 @@
 <!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Mora Bets Lite</title>
-<style>
-  body{font-family:system-ui,Arial;margin:20px;max-width:800px}
-  .card{border:1px solid #ddd;border-radius:14px;padding:16px;margin:12px 0}
-  input,select,button{padding:10px;border-radius:10px;border:1px solid #ccc}
-  .row{display:flex;gap:10px;flex-wrap:wrap}
-</style>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Mora Bets</title>
+
+  <style>
+    :root{--bg:#0f1420;--card:#161b28;--stroke:#2b3245;--text:#e6e9f2;--muted:#9aa4bf;--green:#2dd36f;--amber:#f9d65a;}
+    html,body{background:var(--bg);color:var(--text);margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
+    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+    h1{margin:0;font-size:22px}
+    .muted{color:var(--muted)}
+    .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+    .tab{background:transparent;color:var(--muted);border:1px solid var(--stroke);padding:8px 12px;border-radius:999px;cursor:pointer}
+    .tab.active{color:var(--text);border-color:#7c6dff;box-shadow:0 0 0 1px #7c6dff inset}
+    .search{width:100%;max-width:420px;padding:10px 12px;border-radius:10px;background:var(--card);border:1px solid var(--stroke);color:var(--text)}
+    .toolbar{display:flex;gap:8px;align-items:center;margin:10px 0 18px;flex-wrap:wrap}
+    .grid{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:14px}
+    @media(min-width:900px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    .card{background:var(--card);border:1px solid var(--stroke);border-radius:14px;padding:14px}
+    .row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .pill{font-size:12px;border:1px solid var(--stroke);padding:3px 8px;border-radius:999px;color:#cbd3ee}
+    .over{color:var(--green);font-weight:600}
+    .under{color:var(--amber)}
+    .tiny-link{display:inline-flex;align-items:center;gap:6px;color:#9dd0ff;font-size:12px;cursor:pointer;text-decoration:none;border-bottom:1px dashed #2b3245}
+    .tiny-link:hover{color:#cfe6ff}
+
+    .edge-badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#1e9d59;color:#fff;margin-left:8px;line-height:18px;user-select:none}
+
+    /* Hide market tabs (defensive) */
+    #market-tabs{display:none !important;}
+
+    /* big loading overlay */
+    .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      background:rgba(10,14,24,.85);backdrop-filter:saturate(140%) blur(2px);
+      z-index:10;flex-direction:column;text-align:center;padding:24px}
+    .spinner{width:44px;height:44px;border:3px solid #2b3245;border-top-color:#9dd0ff;border-radius:50%;animation:spin .9s linear infinite;margin-bottom:12px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* AI Scout Modal Styles (kept for future use) */
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999}
+    .modal.hidden{display:none}
+    .modal-inner{background:#121317;border:1px solid #2a2d36;border-radius:14px;min-width:720px;max-width:1020px;max-height:80vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #1f2230}
+    .modal-head .title{font-weight:700}
+    .modal-head .x{background:transparent;border:none;color:#aab2c8;font-size:20px;cursor:pointer}
+    .modal-body{padding:16px 18px}
+    .error{color:#ff6b6b}
+    .hidden{display:none}
+    .sec{margin-top:10px}
+    .sec-title{font-weight:600;margin:6px 0 10px 0}
+    .pick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+    .pick{border:1px solid #22293a;border-radius:12px;padding:10px 12px;background:#0f1116}
+    .pick .hdr{display:flex;justify-content:space-between;margin-bottom:6px}
+    .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#1e9d59;color:#fff}
+    .small{font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <div style="font-weight:700">Loading…</div>
+    <div class="muted" style="margin-top:6px">Pulling data & cache-warming.</div>
+  </div>
+
+  <div class="wrap">
+    <div class="top">
+      <h1>Mora Bets</h1>
+      <div class="muted"><span id="count">0</span> results</div>
+    </div>
+
+    <!-- League tabs -->
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-league="mlb">MLB</button>
+      <button class="tab" data-league="nfl">NFL</button>
+      <button class="tab" data-league="nba" disabled>NBA</button>
+      <button class="tab" data-league="nhl" disabled>NHL</button>
+      <button class="tab" data-league="ufc" disabled>UFC</button>
+      <button class="tab" data-league="ncaa" disabled>NCAA</button>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <input id="player" class="search" placeholder="Search MLB player (type 3+ chars) or enter NFL player exact name"/>
+      <select id="prop" class="search" style="max-width:240px">
+        <!-- options filled by JS based on league -->
+      </select>
+      <input id="american" class="search" placeholder="American price (optional e.g. -120)" style="max-width:180px"/>
+      <button id="evalBtn" class="tab">Evaluate</button>
+      <span id="hint" class="muted small">Tip: If price is empty, we'll try to auto-fill from your odds feed.</span>
+    </div>
+
+    <!-- Results -->
+    <div id="results" class="grid"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
 </head><body>
   <h1>Mora Bets Lite</h1>
   <div class="card">
