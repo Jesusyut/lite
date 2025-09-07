@@ -1,6 +1,11 @@
 from flask import Flask, request, jsonify, send_from_directory
 from services.mlb import todays_matchups, search_player, batter_trends_last10
 from services.nfl import last5_trends
+    try:
+    from services.nfl_apisports import search_player as api_search, player_last5_trends as api_last5
+    HAVE_API = True
+except Exception:
+    HAVE_API = False
 from utils.prob import american_to_prob
 
 app = Flask(__name__, static_url_path='', static_folder='static')
@@ -25,12 +30,33 @@ def mlb_player_trends(pid):
     return jsonify(batter_trends_last10(pid))
 
 # --- NFL ---
-@app.get("/api/nfl/player/trends")
-def nfl_player_trends():
-    name = request.args.get("name","").strip()
-    if not name: return jsonify({"error":"name required"}), 400
-    return jsonify(last5_trends(name))
+ @app.get("/api/nfl/player/search")
+def nfl_search():
+    q = request.args.get("q","").strip()
+    if not q or not HAVE_API: return jsonify([])
+    try:
+        js = api_search(q)
+        # normalize to id/name pairs
+        out=[]
+        for r in js.get("response", []):
+            out.append({"id": r.get("id") or r.get("player",{}).get("id"),
+                        "name": r.get("name") or r.get("player",{}).get("name")})
+        return jsonify(out[:10])
+    except Exception:
+        return jsonify([])
 
+@app.get("/api/nfl/player/<int:pid>/trends")
+def nfl_player_trends(pid):
+    season = int(request.args.get("season", "2024"))
+    if HAVE_API:
+        try:
+            return jsonify(api_last5(pid, season))
+        except Exception:
+            pass  # fall through
+    # Fallback: CSV (name-based)
+    name = request.args.get("name","")
+    return jsonify(csv_last5(name))
+    HAVE_API = False
 # --- Evaluation (shared) ---
 @app.post("/api/evaluate")
 def evaluate():
