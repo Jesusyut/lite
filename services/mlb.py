@@ -1,5 +1,5 @@
-import requests, datetime as dt
-from utils.cache import get_cached, set_cached
+import datetime as dt, requests
+from utils.rcache import cached_fetch
 
 BASE = "https://statsapi.mlb.com/api/v1"
 
