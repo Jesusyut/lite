@@ -6,7 +6,7 @@ from services.mlb import todays_matchups, search_player as mlb_search_players, b
 # NFL CSV fallback (no API cost)
 from services.nfl import last5_trends as csv_last5
 
-# NFL API-Sports (optional; cached upstream)
+# NFL API-Sports (optional; cached + budgeted)
 try:
     from services.nfl_apisports import (
         search_player as nfl_api_search,
@@ -17,7 +17,6 @@ except Exception:
     HAVE_API = False
 
 from utils.prob import american_to_prob
-
 from utils.price_source import resolve_shop_price
 
 app = Flask(__name__, static_url_path="", static_folder="static")
@@ -95,33 +94,42 @@ def evaluate():
     league = j.get("league")
     prop = j.get("prop")
     american = j.get("american")
+
+    # If no price provided, try to auto-fill a single price via odds provider (optional).
+    if american in (None, ""):
+        american = resolve_shop_price(
+            league=league,
+            prop=prop,
+            player_name=j.get("player_name"),
+            player_id=j.get("player_id"),
+        )
+
     p_break_even = american_to_prob(american) if american not in (None, "") else None
 
+    # Compute trend probability
     if league == "mlb":
+        if not j.get("player_id"):
+            return jsonify({"error": "player_id required for mlb"}), 400
         t = batter_trends_last10(int(j.get("player_id")))
         if prop == "HITS_0_5":
-            p_trend = (t["hits_rate"] or 0) / 100.0
+            p_trend = (t.get("hits_rate") or 0) / 100.0
         elif prop == "TB_1_5":
-            p_trend = (t["tb2_rate"] or 0) / 100.0
+            p_trend = (t.get("tb2_rate") or 0) / 100.0
         else:
             return jsonify({"error": "bad mlb prop"}), 400
 
     elif league == "nfl":
         season = int(j.get("season", 2024))
-        p_trend = 0.0
         t = {}
-
-        # Prefer API-Sports when we have player_id + API
+        # Prefer API-Sports when available and player_id given
         if HAVE_API and j.get("player_id"):
             try:
                 t = nfl_api_last5(int(j["player_id"]), season)
             except Exception:
                 t = {}
-
-        # Fallback to CSV by name
+        # Fallback to CSV (name-based)
         if not t:
             t = csv_last5(j.get("player_name", "") or "")
-
         if prop == "REC_3_5":
             p_trend = (t.get("rec_over35_rate") or 0) / 100.0
         elif prop == "RUSH_49_5":
@@ -147,24 +155,4 @@ def evaluate():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
-    @app.post("/api/evaluate")
-def evaluate():
-    j = request.get_json() or {}
-    league = j.get("league")
-    prop   = j.get("prop")
-    american = j.get("american")
-
-    # 1) If user didn't give a price, try to auto-fill ONE price via odds api (on-demand).
-    if american in (None, ""):
-        american = resolve_shop_price(
-            league=league,
-            prop=prop,
-            player_name=j.get("player_name"),
-            player_id=j.get("player_id"),
-        )
-
-    p_break_even = american_to_prob(american) if american not in (None, "") else None
-
-    # ... keep your trend code exactly as you have it ...
-    # (compute p_trend from MLB or NFL trends, then tag)
 
