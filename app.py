@@ -86,62 +86,79 @@ def evaluate():
     """
     body:
       league: 'mlb'|'nfl'
-      prop:   'HITS_0_5'|'TB_1_5'|'REC_3_5'|'RUSH_49_5'
+      prop:
+        MLB -> 'HITS_0_5'|'TB_1_5'
+        NFL -> 'REC'|'RUSH_YDS'|'REC_YDS'|'PASS_YDS'   (broader props)
       player_id (mlb or nfl when using API) OR player_name (nfl CSV fallback)
-      american (optional, e.g., -120)
+      american (optional, e.g., -120)  # if missing, we'll fetch FD price (±250 filter)
       season (optional, nfl; default 2024)
     """
     j = request.get_json() or {}
     league = j.get("league")
-    prop = j.get("prop")
+    prop   = j.get("prop")
     american = j.get("american")
+    used_line = None
 
-    # If no price provided, try to auto-fill a single price via odds provider (optional).
+    # 1) Try to fetch FanDuel line+price if user left price blank (and sometimes for line discovery)
+    quote = None
     if american in (None, ""):
-        american = resolve_shop_price(
-            league=league,
-            prop=prop,
-            player_name=j.get("player_name"),
-            player_id=j.get("player_id"),
-        )
+        quote = resolve_shop_quote(league=league, prop=prop, player_name=j.get("player_name"))
+        if quote:
+            american = quote.get("american")
+            used_line = quote.get("line")
 
+    # 2) Break-even from price (if any)
+    from utils.prob import american_to_prob
     p_break_even = american_to_prob(american) if american not in (None, "") else None
 
-    # Compute trend probability
+    # 3) Compute trend probability (MLB fixed, NFL broader/dynamic)
     if league == "mlb":
+        from services.mlb import batter_trends_last10
         if not j.get("player_id"):
             return jsonify({"error": "player_id required for mlb"}), 400
-        t = batter_trends_last10(int(j.get("player_id")))
+        t = batter_trends_last10(int(j["player_id"]))
         if prop == "HITS_0_5":
             p_trend = (t.get("hits_rate") or 0) / 100.0
+            used_line = used_line or 0.5
         elif prop == "TB_1_5":
             p_trend = (t.get("tb2_rate") or 0) / 100.0
+            used_line = used_line or 1.5
         else:
             return jsonify({"error": "bad mlb prop"}), 400
 
     elif league == "nfl":
         season = int(j.get("season", 2024))
+        # Map prop -> metric; default lines if no quote available
+        metric_defaults = {
+            "REC": 3.5,
+            "RUSH_YDS": 49.5,
+            "REC_YDS": 49.5,
+            "PASS_YDS": 249.5,
+        }
+        metric = prop
+        used_line = float(used_line if used_line is not None else metric_defaults.get(metric, 0.0))
+
+        # Prefer API-Sports when we have player_id + API
         t = {}
-        # Prefer API-Sports when available and player_id given
-        if HAVE_API and j.get("player_id"):
+        if 'player_id' in j and j['player_id'] and HAVE_API:
             try:
-                t = nfl_api_last5(int(j["player_id"]), season)
+                from services.nfl_apisports import player_last5_dynamic
+                t = player_last5_dynamic(int(j["player_id"]), season, metric, used_line)
             except Exception:
                 t = {}
-        # Fallback to CSV (name-based)
         if not t:
-            t = csv_last5(j.get("player_name", "") or "")
-        if prop == "REC_3_5":
-            p_trend = (t.get("rec_over35_rate") or 0) / 100.0
-        elif prop == "RUSH_49_5":
-            p_trend = (t.get("rush_over49_rate") or 0) / 100.0
-        else:
-            return jsonify({"error": "bad nfl prop"}), 400
+            # CSV fallback by player_name
+            from services.nfl import last5_dynamic
+            t = last5_dynamic(j.get("player_name","") or "", metric, used_line)
+
+        p_trend = (t.get("rate") or 0) / 100.0
+        if p_trend == 0 and t.get("n",0) == 0:
+            return jsonify({"error":"No recent games for this player"}), 404
 
     else:
         return jsonify({"error": "bad league"}), 400
 
-    # Simple tagging
+    # 4) Tag
     tag = "Fade"
     if p_trend >= 0.58:
         tag = "Straight"
@@ -152,8 +169,6 @@ def evaluate():
         "p_trend": round(p_trend, 4),
         "break_even_prob": round(p_break_even, 4) if p_break_even is not None else None,
         "tag": tag,
+        "used_line": used_line,
+        "price_source": ("FanDuel" if quote else None)
     })
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
-
