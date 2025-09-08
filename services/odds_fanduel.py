@@ -1,314 +1,217 @@
-# services/odds_fanduel.py
 from __future__ import annotations
 import os, requests
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Any, Dict, List, Optional, Tuple
 from utils.rcache import cached_fetch
 
-# ---- Robust base; ensure exactly one /sports ----
-RAW_BASE = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4").rstrip("/")
-SPORTS_BASE = RAW_BASE if RAW_BASE.endswith("/sports") else RAW_BASE + "/sports"
+# ----------------- config -----------------
+ODDS_BASE = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports").rstrip("/")
+ODDS_KEY  = os.getenv("ODDS_API_KEY")
+ODDS_MAX_ABS = float(os.getenv("ODDS_MAX_ABS", "250"))  # ± cap for prices
 
-ODDS_KEY       = os.getenv("ODDS_API_KEY")
-ODDS_REGION    = os.getenv("ODDS_REGION", "us")
-ODDS_MAX_ABS   = float(os.getenv("ODDS_MAX_ABS", "250"))  # keep only |american| <= this
-EVENTS_MAX     = int(os.getenv("ODDS_EVENTS_MAX", "16"))  # how many events to scan
-ODDS_TIMEOUT_S = float(os.getenv("ODDS_TIMEOUT_S", "10"))
-
-def _price_ok(x: float) -> bool:
+def _price_ok(american: Any) -> bool:
     try:
-        return abs(float(x)) <= ODDS_MAX_ABS
+        return abs(float(american)) <= ODDS_MAX_ABS
     except Exception:
         return False
 
-def _req(url: str, params: Dict[str, Any], *, ttl=600):
+def _to_float(x, default=None):
+    try: return float(x)
+    except Exception: return default
+
+# ----------------- low-level fetchers -----------------
+def _get_events(sport_key: str, limit: int) -> List[Dict[str, Any]]:
+    """GET /{sport}/events"""
     if not ODDS_KEY:
         raise RuntimeError("ODDS_API_KEY missing")
-    p = dict(params or {}); p["apiKey"] = ODDS_KEY
+    url = f"{ODDS_BASE}/{sport_key}/events"
+    params = {"apiKey": ODDS_KEY}
     def call():
-        r = requests.get(url, params=p, timeout=ODDS_TIMEOUT_S)
+        r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
-        js = r.json()
-        # Provider error bodies look like {"message": "..."}
-        if isinstance(js, dict) and js.get("message"):
-            raise RuntimeError(js["message"])
-        return js
-    return cached_fetch("oddsfd", url, p, call, ttl=ttl, stale_ttl=3*86400)
+        return r.json()
+    evs = cached_fetch("oddsfd", f"/{sport_key}/events", params, call, ttl=120, stale_ttl=600)
+    # Sort by commence_time so we scan near-term games first
+    try:
+        evs = sorted(evs, key=lambda e: e.get("commence_time",""))
+    except Exception:
+        pass
+    return evs[:max(1, int(limit))]
 
-# ---------- Event lists ----------
-def _events(sport_path: str) -> List[Dict[str, Any]]:
-    url = f"{SPORTS_BASE}/{sport_path}/events"
-    js = _req(url, {}, ttl=300)
-    return js if isinstance(js, list) else js.get("events", []) if isinstance(js, dict) else []
-
-def _mlb_events() -> List[Dict[str, Any]]:
-    return _events("baseball_mlb")
-
-def _nfl_events() -> List[Dict[str, Any]]:
-    return _events("americanfootball_nfl")
-
-# ---------- Event odds ----------
-def _event_odds(sport_path: str, event_id: str, markets_csv: str) -> Dict[str, Any]:
-    # Player markets must come from /events/{id}/odds
-    url = f"{SPORTS_BASE}/{sport_path}/events/{event_id}/odds"
-    return _req(url, {
-        "regions": ODDS_REGION,
+def _get_event_odds(sport_key: str, event_id: str, markets_csv: str) -> Dict[str, Any]:
+    """GET /{sport}/events/{id}/odds (FanDuel only)"""
+    if not ODDS_KEY:
+        raise RuntimeError("ODDS_API_KEY missing")
+    url = f"{ODDS_BASE}/{sport_key}/events/{event_id}/odds"
+    params = {
+        "regions": "us",
         "bookmakers": "fanduel",
         "markets": markets_csv,
         "oddsFormat": "american",
-    }, ttl=300)
-
-# ---------- Helpers ----------
-def _parse_american(price) -> Optional[float]:
-    if isinstance(price, (int, float)):
-        return float(price)
-    if isinstance(price, str):
-        s = price.strip().upper()
-        if s in ("EVEN", "EV"):
-            return 100.0
-        try:
-            return float(price)
-        except Exception:
-            return None
-    if isinstance(price, dict):
-        for k in ("american", "odds_american", "price"):
-            v = price.get(k)
-            if isinstance(v, str):
-                ss = v.strip().upper()
-                if ss in ("EVEN", "EV"):
-                    return 100.0
-                try:
-                    return float(v)
-                except Exception:
-                    continue
-            elif isinstance(v, (int, float)):
-                return float(v)
-    return None
-
-def _iter_fd_markets(rows: List[Dict[str, Any]]):
-    """Yield (market_key, market_dict) for FanDuel only across event-odds payloads."""
-    for ev in rows or []:
-        for bm in (ev.get("bookmakers") or []):
-            bk = (bm.get("key") or bm.get("title") or "").lower()
-            if bk != "fanduel":
-                continue
-            for m in (bm.get("markets") or []):
-                yield m.get("key"), m
-
-def _pull_outcome(o: Dict[str, Any]):
-    """
-    Return (side, player_name, line, american) for an outcome.
-    side is 'over' or 'under'.
-    """
-    name = str(o.get("name", "")).strip().lower()  # 'over'/'under'
-    desc = str(o.get("description") or o.get("participant") or o.get("player") or "").strip()
-    if not name or not desc:
-        return None
-    if "over" not in name and "under" not in name:
-        return None
-    american = _parse_american(o.get("price"))
-    if american is None or not _price_ok(american):
-        return None
-    point = o.get("point", o.get("line"))
-    try:
-        line = float(point) if point is not None else None
-    except Exception:
-        line = None
-    side = "over" if "over" in name else "under"
-    return side, desc, line, float(american)
-
-# ---------- Public: MLB ----------
-def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
-    """
-    MLB fixed props (market keys per docs):
-      HITS_0_5  -> batter_hits @ 0.5 (Over)
-      TB_1_5    -> batter_total_bases @ 1.5 (Over)
-    """
-    mk_map = {
-        "HITS_0_5": ("batter_hits", 0.5),
-        "TB_1_5":   ("batter_total_bases", 1.5),
+        "apiKey": ODDS_KEY,
     }
-    mk, target = mk_map.get(prop, (None, None))
-    if not mk:
-        return None
+    def call():
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    return cached_fetch("oddsfd", f"/{sport_key}/events/{event_id}/odds", params, call, ttl=120, stale_ttl=600)
 
-    evs = _mlb_events()[:max(1, EVENTS_MAX)]
-    rows: List[Dict[str, Any]] = []
-    for ev in evs:
-        ev_id = (ev.get("id") or ev.get("event_id") or ev.get("idEvent"))
-        if not ev_id:
+def _iter_fd_markets(js: Dict[str, Any], allowed: set[str]):
+    for bm in js.get("bookmakers", []):
+        if str(bm.get("key","")).lower() != "fanduel":
             continue
-        js = _event_odds("baseball_mlb", str(ev_id), mk)
-        if isinstance(js, dict):
-            rows.append(js)
+        for m in bm.get("markets", []):
+            k = m.get("key")
+            if k in allowed:
+                yield k, m
 
-    needle = (player_name or "").lower()
-    for key, m in _iter_fd_markets(rows):
-        if key != mk:
-            continue
-        for o in (m.get("outcomes") or []):
-            got = _pull_outcome(o)
-            if not got:
-                continue
-            side, desc, ln, american = got
-            if side != "over":
-                continue
-            if needle not in desc.lower():
-                continue
-            line = ln if ln is not None else target
-            if line is None:
-                continue
-            # tolerate tiny drift; skip wild mismatches
-            if abs(float(line) - float(target)) > 1.0:
-                continue
-            return float(line), float(american)
+def _american_from_price(price_obj: Any) -> Optional[float]:
+    # price could be number or dict
+    try:
+        return float(price_obj)
+    except Exception:
+        if isinstance(price_obj, dict):
+            for k in ("american", "price", "odds_american"):
+                if k in price_obj:
+                    v = _to_float(price_obj[k])
+                    if v is not None:
+                        return v
     return None
 
+# ----------------- MLB helpers -----------------
+def _extract_batter_outcomes(market_key: str, market: Dict[str, Any],
+                             target_line: float) -> List[Tuple[str, float, float]]:
+    """
+    From a FanDuel market, pull Over outcomes that match our target line.
+    Returns list of tuples: (player_name, line, american)
+    """
+    out: List[Tuple[str, float, float]] = []
+    for o in market.get("outcomes", []):
+        name = str(o.get("name","")).lower()
+        side = str(o.get("side","")).lower()
+        is_over = ("over" in name) or (side == "over")
+        if not is_over:
+            continue
+
+        point = o.get("point", o.get("line"))
+        line = _to_float(point, target_line)
+        # Strict to our SKUs only
+        if abs(line - float(target_line)) > 1e-6:
+            continue
+
+        american = _american_from_price(o.get("price", o.get("odds_american", o.get("american"))))
+        if american is None or not _price_ok(american):
+            continue
+
+        desc = str(o.get("description") or o.get("participant") or o.get("player") or "").strip()
+        if not desc:
+            continue
+
+        out.append((desc, float(line), float(american)))
+    return out
 
 def list_fd_mlb_candidates(max_events: int = 8, per_event_cap: int = 30) -> List[Dict[str, Any]]:
     """
-    Return FanDuel MLB Over outcomes for batter hits (0.5) / total bases (1.5)
-    aggregated in a *round-robin* across multiple events so one matchup can't dominate.
-
-    Output items: {player_name, prop, line, american}
+    Round-robin list of MLB candidates across upcoming events:
+      markets: batter_hits (0.5), batter_total_bases (1.5)
+      returns [{player_name, prop, line, american}]
     """
-    # 1) pick upcoming events
-    events = _events_list("baseball_mlb")
-    events = sorted(events, key=lambda e: e.get("commence_time",""))[:max_events]
-
-    # 2) per-event buckets
-    buckets: List[List[Dict[str, Any]]] = []
-    target_map = {
-        "batter_hits": (0.5, "HITS_0_5"),
-        "batter_total_bases": (1.5, "TB_1_5"),
-    }
+    events = _get_events("baseball_mlb", max_events=max_events)
+    all_lists: List[List[Dict[str, Any]]] = []
 
     for ev in events:
-        eid = ev.get("id")
-        if not eid:
-            continue
-        try:
-            data = _event_odds("baseball_mlb", eid, "batter_hits,batter_total_bases")
-        except Exception:
-            continue
+        js = _get_event_odds("baseball_mlb", ev["id"], "batter_hits,batter_total_bases")
+        per_ev: List[Dict[str, Any]] = []
 
-        bucket: List[Dict[str, Any]] = []
-        for bm in data.get("bookmakers", []):
-            if str(bm.get("key","")).lower() != "fanduel":
-                continue
-            for m in bm.get("markets", []):
-                key = m.get("key")
-                if key not in target_map:
-                    continue
-                target, prop = target_map[key]
-                for o in m.get("outcomes", []):
-                    # Only take Over side
-                    side = (o.get("side") or o.get("name") or "").lower()
-                    if not ("over" in side):
-                        continue
+        for key, m in _iter_fd_markets(js, {"batter_hits", "batter_total_bases"}):
+            target = 0.5 if key == "batter_hits" else 1.5
+            prop   = "HITS_0_5" if key == "batter_hits" else "TB_1_5"
+            for player, line, american in _extract_batter_outcomes(key, m, target):
+                per_ev.append({
+                    "player_name": player,
+                    "prop": prop,
+                    "line": float(line),
+                    "american": float(american),
+                })
+                if len(per_ev) >= per_event_cap:
+                    break
+            if len(per_ev) >= per_event_cap:
+                break
 
-                    # Price (american) with ±ODDS_MAX_ABS filter
-                    price = o.get("price", o.get("odds_american", o.get("american")))
-                    american = None
-                    try:
-                        american = float(price)
-                    except Exception:
-                        if isinstance(price, dict):
-                            for k in ("american", "price", "odds_american"):
-                                if k in price:
-                                    try:
-                                        american = float(price[k]); break
-                                    except: pass
-                    if american is None or not _price_ok(american):
-                        continue
+        if per_ev:
+            all_lists.append(per_ev)
 
-                    # Line must match the fixed target
-                    point = o.get("point", o.get("line"))
-                    try:
-                        line = float(point) if point is not None else target
-                    except Exception:
-                        line = target
-                    if abs(line - target) > 1e-6:
-                        continue
-
-                    # Player display name
-                    pname = (o.get("description") or o.get("participant") or o.get("player") or "").strip()
-                    if not pname:
-                        continue
-
-                    bucket.append({
-                        "player_name": pname,
-                        "prop": prop,
-                        "line": float(line),
-                        "american": float(american),
-                    })
-
-        if bucket:
-            buckets.append(bucket[:per_event_cap])
-
-    # 3) round-robin merge + de-dupe by (player_name, prop)
-    out: List[Dict[str, Any]] = []
-    dedup = set()
+    # round-robin merge to avoid one-game domination
+    merged: List[Dict[str, Any]] = []
     i = 0
-    while buckets:
-        i %= len(buckets)
-        bucket = buckets[i]
-        if not bucket:
-            buckets.pop(i)
-            continue
-        cand = bucket.pop(0)
-        key = (cand["player_name"], cand["prop"])
-        if key not in dedup:
-            dedup.add(key)
-            out.append(cand)
+    while True:
+        progressed = False
+        for lst in all_lists:
+            if i < len(lst):
+                merged.append(lst[i])
+                progressed = True
+        if not progressed:
+            break
         i += 1
+    return merged
 
-    return out
-
-# ---------- Public: NFL ----------
-def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
+def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
     """
-    NFL broader props (use market's live point). Market keys per docs:
-      REC       -> player_receptions
-      RUSH_YDS  -> player_rush_yds
-      REC_YDS   -> player_reception_yds
-      PASS_YDS  -> player_pass_yds
+    Try to find an FD price for a specific MLB player & prop across near-term events.
+    Returns (line, american) or None.
     """
-    mk_map = {
-        "REC":      "player_receptions",
-        "RUSH_YDS": "player_rush_yds",
-        "REC_YDS":  "player_reception_yds",
-        "PASS_YDS": "player_pass_yds",
-    }
-    mk = mk_map.get(prop)
-    if not mk:
+    target = 0.5 if prop == "HITS_0_5" else 1.5 if prop == "TB_1_5" else None
+    key    = "batter_hits" if prop == "HITS_0_5" else "batter_total_bases" if prop == "TB_1_5" else None
+    if target is None or key is None:
         return None
 
-    evs = _nfl_events()[:max(1, EVENTS_MAX)]
-    rows: List[Dict[str, Any]] = []
-    for ev in evs:
-        ev_id = (ev.get("id") or ev.get("event_id") or ev.get("idEvent"))
-        if not ev_id:
-            continue
-        js = _event_odds("americanfootball_nfl", str(ev_id), mk)
-        if isinstance(js, dict):
-            rows.append(js)
+    needle = player_name.lower()
+    for ev in _get_events("baseball_mlb", 10):
+        js = _get_event_odds("baseball_mlb", ev["id"], key)
+        for _, m in _iter_fd_markets(js, {key}):
+            for o in _extract_batter_outcomes(key, m, target):
+                player, line, american = o
+                if needle in player.lower():
+                    return line, american
+    return None
 
-    needle = (player_name or "").lower()
-    for key, m in _iter_fd_markets(rows):
-        if key != mk:
-            continue
-        for o in (m.get("outcomes") or []):
-            got = _pull_outcome(o)
-            if not got:
-                continue
-            side, desc, ln, american = got
-            if side != "over":
-                continue
-            if needle not in desc.lower():
-                continue
-            if ln is None:
-                continue
-            return float(ln), float(american)
+# ----------------- NFL quotes -----------------
+_NFL_MAP = {
+    "REC":      ("americanfootball_nfl", "player_receptions"),
+    "RUSH_YDS": ("americanfootball_nfl", "player_rush_yds"),
+    "REC_YDS":  ("americanfootball_nfl", "player_reception_yds"),
+    "PASS_YDS": ("americanfootball_nfl", "player_pass_yds"),
+}
+
+def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
+    """
+    Return (line, american) for Over on common NFL props.
+    """
+    tup = _NFL_MAP.get(prop)
+    if not tup:
+        return None
+    sport_key, market_key = tup
+    needle = player_name.lower()
+
+    for ev in _get_events(sport_key, 8):
+        js = _get_event_odds(sport_key, ev["id"], market_key)
+        for _, m in _iter_fd_markets(js, {market_key}):
+            for o in m.get("outcomes", []):
+                # Over only
+                name = str(o.get("name","")).lower()
+                side = str(o.get("side","")).lower()
+                if "over" not in name and side != "over":
+                    continue
+
+                desc = str(o.get("description") or o.get("participant") or o.get("player") or "")
+                if needle not in desc.lower():
+                    continue
+
+                american = _american_from_price(o.get("price", o.get("odds_american", o.get("american"))))
+                if american is None or not _price_ok(american):
+                    continue
+
+                line = _to_float(o.get("point", o.get("line")), 0.0)
+                return float(line), float(american)
     return None
 
 
