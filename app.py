@@ -10,8 +10,8 @@ except Exception:
 
 from utils.prob import american_to_prob
 from utils.price_source import resolve_shop_price, resolve_shop_quote
-from services.odds_fanduel import list_fd_mlb_candidates
-cands = list_fd_mlb_candidates(max_events=max_events)[:max_cands]
+
+
 
 app = Flask(__name__, static_url_path='', static_folder='static')
 
