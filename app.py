@@ -111,23 +111,37 @@ def evaluate():
 
         from utils.prob import american_to_prob
         p_break_even = american_to_prob(american) if american not in (None, "") else None
-
-        if league == "mlb":
+        
+              if league == "mlb":
             from services.mlb import batter_trends_last10, resolve_player_id
-            pid = j.get("player_id")
-            if not pid:
-                nm = j.get("player_name", "")
-                pid = resolve_player_id(nm)
-                if not pid:
-                    return jsonify({"error":"MLB player could not be resolved"}), 400
-
-            t = batter_trends_last10(int(pid))
+        
+            name = (j.get("player_name") or "").strip()
+            pid  = j.get("player_id")
+        
+            # If no id, try to resolve by name (API-SPORTS id)
+            if not pid and name:
+                try:
+                    pid = resolve_player_id(name)
+                except Exception:
+                    pid = None
+        
+            # Need at least one of (id or name)
+            if not pid and not name:
+                return jsonify({"error": "MLB needs player_id or player_name"}), 400
+        
+            # Call trends with BOTH pid and name so the service can resolve to API-SPORTS id
+            try:
+                t = batter_trends_last10(int(pid) if pid else 0, player_name=name)
+            except Exception:
+                t = {}
+        
+            # Map prop → trend
             if prop == "HITS_0_5":
-                p_trend = (t.get("hits_rate") or 0) / 100.0
+                p_trend = float(t.get("hits_rate") or 0.0) / 100.0
             elif prop == "TB_1_5":
-                p_trend = (t.get("tb2_rate")  or 0) / 100.0
+                p_trend = float(t.get("tb2_rate")  or 0.0) / 100.0
             else:
-                return jsonify({"error":"bad mlb prop"}), 400
+                return jsonify({"error": "bad mlb prop"}), 400
 
         elif league == "nfl":
             from services.nfl import last5_trends
