@@ -47,8 +47,10 @@ function setPropOptions(league){
         ["TB_1_5","MLB: Over 1.5 Total Bases"],
       ]
     : [
-        ["REC_3_5","NFL: Over 3.5 Receptions"],
-        ["RUSH_49_5","NFL: Over 49.5 Rush Yards"],
+        ["REC","NFL: Receptions (FD line)"],
+        ["RUSH_YDS","NFL: Rushing Yards (FD line)"],
+        ["REC_YDS","NFL: Receiving Yards (FD line)"],
+        ["PASS_YDS","NFL: Passing Yards (FD line)"],
       ];
   for (const [val, label] of opts){
     const o = document.createElement("option");
@@ -58,6 +60,7 @@ function setPropOptions(league){
     ? "Search MLB player (type 3+ chars)"
     : "Enter NFL player (exact name or search if available)";
 }
+
 
 tabsEl.addEventListener("click", (e)=>{
   const btn = e.target.closest(".tab");
