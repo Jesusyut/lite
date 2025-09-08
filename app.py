@@ -146,30 +146,43 @@ def evaluate():
 # --- Top Picks (MLB) ---  (ONLY ONE definition — remove any duplicates!)
 @app.get("/api/top/mlb")
 def top_mlb():
-    max_events = int(request.args.get("events", "8"))
     """
     Build MLB Top Picks from FanDuel batter props + last-10 trends.
-    Safety rails:
-      - ?limit= (default 12, max 24)
-      - ?max_cands= (default 40)
-      - ?budget_s= (default 8.0 total loop time)
+
+    Query params:
+      limit           : max results to return (default 12, max 24)
+      max_cands       : cap candidate scan after odds (default 40)
+      budget_s        : total compute time budget in seconds (default 8.0)
+      min_edge        : require (p_trend - break_even_prob) >= min_edge (default 0.02 = 2%)
+      min_trend       : require p_trend >= min_trend (default 0.55 = 55%)
+      allow_negative  : if "1", include negative edges (default 0 = filter out)
+      events          : how many MLB events to scan from odds (default 8)
+      per_event_cap   : max props per event to consider before merge (default 30)
     """
     import time
     from services.odds_fanduel import list_fd_mlb_candidates
+    from services.mlb import resolve_player_id, batter_trends_last10
+    from utils.prob import american_to_prob
 
-    limit = min(max(int(request.args.get("limit", "12")), 1), 24)
-    max_cands = min(max(int(request.args.get("max_cands", "40")), 5), 200)
-    budget_s = float(request.args.get("budget_s", "8.0"))
+    # --- knobs ---
+    limit         = min(max(int(request.args.get("limit", "12")), 1), 24)
+    max_cands     = min(max(int(request.args.get("max_cands", "40")), 5), 200)
+    budget_s      = float(request.args.get("budget_s", "8.0"))
+    min_edge      = float(request.args.get("min_edge", "0.02"))     # 2%
+    min_trend     = float(request.args.get("min_trend", "0.55"))    # 55%
+    allow_neg     = request.args.get("allow_negative", "0") == "1"
+    events        = max(1, int(request.args.get("events", "8")))
+    per_event_cap = max(5, int(request.args.get("per_event_cap", "30")))
 
     t0 = time.time()
+
+    # --- odds → round-robin candidate list across events ---
     try:
-        cands = list_fd_mlb_candidates()
+        cands = list_fd_mlb_candidates(max_events=events, per_event_cap=per_event_cap)[:max_cands]
     except Exception as e:
         return jsonify({"error": f"odds fetch failed: {e}"}), 502
 
-    cands = cands[:max_cands]
     picks = []
-
     for c in cands:
         if len(picks) >= limit or (time.time() - t0) > budget_s:
             break
@@ -186,16 +199,25 @@ def top_mlb():
 
         if c["prop"] == "HITS_0_5":
             p_trend = (t.get("hits_rate") or 0) / 100.0
-            spark = t.get("hits_series") or []
+            spark   = t.get("hits_series") or []
         else:
             p_trend = (t.get("tb2_rate") or 0) / 100.0
-            spark = t.get("tb2_series") or []
+            spark   = t.get("tb2_series") or []
 
         p_be = american_to_prob(c["american"])
         if p_be is None:
             continue
+
         edge = p_trend - p_be
 
+        # --- filters (only show true "picks") ---
+        if not allow_neg:
+            if p_trend < min_trend:
+                continue
+            if edge < min_edge:
+                continue
+
+        # Tag stays trend-based (simple/readable)
         tag = "Fade"
         if p_trend >= 0.58: tag = "Straight"
         elif p_trend >= 0.52: tag = "Parlay leg"
@@ -215,8 +237,3 @@ def top_mlb():
 
     picks.sort(key=lambda x: x["edge"], reverse=True)
     return jsonify(picks[:limit])
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
-
-
