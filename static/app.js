@@ -257,21 +257,22 @@ async function loadTopPicks(){
   clearResults();
   setLoading(true);
   try{
-    const list = await fetch("/api/top/mlb?limit=12").then(r=>r.json());
+    const r = await fetch("/api/top/mlb?limit=12");
+    if(!r.ok){
+      const msg = `Top picks request failed (${r.status})`;
+      addResultCard({title:"Error", subtitle:msg, pTrend:0, breakEven:null, tag:"Fade"});
+      return;
+    }
+    const list = await r.json();
     if(Array.isArray(list) && list.length){
       for(const p of list) addTopCard(p);
     } else {
-      addResultCard({title:"No picks", subtitle:"No FanDuel candidates within ±250 today.", pTrend:0, breakEven:null, tag:"Fade"});
+      addResultCard({title:"No picks", subtitle:"No FanDuel candidates within ±250 (or odds feed empty).", pTrend:0, breakEven:null, tag:"Fade"});
     }
-  }catch(_){
+  }catch(e){
     addResultCard({title:"Error", subtitle:"Could not load top picks", pTrend:0, breakEven:null, tag:"Fade"});
   }finally{
     setLoading(false);
   }
 }
-topBtn.addEventListener("click", loadTopPicks);
-
-// init
-setPropOptions(currentLeague);
-setLoading(false);
 
