@@ -2,19 +2,32 @@ let currentLeague = "mlb";
 let selectedMlb = null; // {id, name}
 let selectedNfl = null; // {id, name}
 
-const tabsEl = document.getElementById("tabs");
-const playerEl = document.getElementById("player");
-const propEl = document.getElementById("prop");
+const tabsEl     = document.getElementById("tabs");
+const playerEl   = document.getElementById("player");
+const propEl     = document.getElementById("prop");
 const americanEl = document.getElementById("american");
-const evalBtn = document.getElementById("evalBtn");
-const topBtn = document.getElementById("topBtn");
-const resultsEl = document.getElementById("results");
-const countEl = document.getElementById("count");
-const loadingEl = document.getElementById("loading");
+const evalBtn    = document.getElementById("evalBtn");
+const topBtn     = document.getElementById("topBtn");
+const resultsEl  = document.getElementById("results");
+const countEl    = document.getElementById("count");
+const loadingEl  = document.getElementById("loading");
 
-function setLoading(v){ loadingEl.style.display = v ? "flex" : "none"; }
-function setCount(n){ countEl.textContent = String(n); }
+function setLoading(v){ if(loadingEl) loadingEl.style.display = v ? "flex" : "none"; }
+function setCount(n){ if(countEl) countEl.textContent = String(n); }
 function clearResults(){ resultsEl.innerHTML = ""; setCount(0); }
+function pct(x){ return (100*(+x||0)).toFixed(1)+'%'; }
+
+// Robust JSON fetch: turns HTML 500 pages into thrown errors we can render.
+async function fetchJSON(url, opts){
+  const res = await fetch(url, opts);
+  let data;
+  try { data = await res.json(); }
+  catch { throw new Error(`HTTP ${res.status}`); } // backend returned HTML not JSON
+  if (!res.ok || (data && data.error)) {
+    throw new Error(data?.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
 
 function addResultCard({title, subtitle, pTrend, breakEven, tag}) {
   const card = document.createElement("div");
@@ -60,12 +73,11 @@ function sparkSVG(arr){
 function addTopCard(pick){
   const propLabel = pick.prop === "HITS_0_5" ? "Over 0.5 Hits" : "Over 1.5 Total Bases";
   const title = `${pick.player_name} — ${propLabel}`;
-  const subtitleParts = [
+  const subtitle = [
     `Line ${Number(pick.line).toFixed(1)}`,
     `Trend ${(pick.p_trend*100).toFixed(1)}%`,
     `Break-even ${(pick.break_even_prob*100).toFixed(1)}%`
-  ];
-  const subtitle = subtitleParts.join(" • ");
+  ].join(" • ");
   const svg = sparkSVG(pick.spark || []);
 
   const card = document.createElement("div");
@@ -94,7 +106,7 @@ function addTopCard(pick){
   // Wire "Use in evaluator"
   const btn = card.querySelector('button[data-act="use"]');
   btn.addEventListener("click", ()=>{
-    // force MLB tab
+    // force MLB tab active
     for(const b of tabsEl.querySelectorAll(".tab")) {
       if (b.dataset.league === "mlb") b.classList.add("active"); else b.classList.remove("active");
     }
@@ -106,8 +118,6 @@ function addTopCard(pick){
     propEl.value = pick.prop;
     americanEl.value = pick.american ?? "";
 
-    // Optionally auto-run evaluate:
-    // evalBtn.click();
     window.scrollTo({top:0,behavior:"smooth"});
   });
 
@@ -192,13 +202,14 @@ playerEl.addEventListener("change", async ()=>{
   }
 });
 
+// Evaluate
 evalBtn.addEventListener("click", async ()=>{
   clearResults();
 
   const prop = propEl.value;
   const americanRaw = americanEl.value.trim();
   const american = americanRaw ? Number(americanRaw) : null;
-  let payload = { league: currentLeague, prop, american };
+  const payload = { league: currentLeague, prop, american };
 
   let title = "";
   if(currentLeague === "mlb"){
@@ -211,7 +222,7 @@ evalBtn.addEventListener("click", async ()=>{
     title = `${selectedMlb.name} — ${prop.includes("HITS") ? "Over 0.5 Hits" : "Over 1.5 Total Bases"}`;
   } else {
     const name = playerEl.value.trim();
-    if(selectedNfl){ payload.player_id = selectedNfl.id; title = `${selectedNfl.name}`; }
+    if(selectedNfl){ payload.player_id = selectedNfl.id; payload.player_name = selectedNfl.name; title = `${selectedNfl.name}`; }
     else if(name){ payload.player_name = name; title = name; }
     else {
       addResultCard({title:"Error", subtitle:"Enter NFL player name", pTrend:0, breakEven:null, tag:"Fade"});
@@ -223,30 +234,26 @@ evalBtn.addEventListener("click", async ()=>{
 
   setLoading(true);
   try{
-    const res = await fetch("/api/evaluate", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+    const data = await fetchJSON("/api/evaluate", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
       body: JSON.stringify(payload)
-    }).then(r=>r.json());
+    });
 
-    if(res.error){
-      addResultCard({title:"Error", subtitle:String(res.error), pTrend:0, breakEven:null, tag:"Fade"});
-    }else{
-      const parts = [];
-      if (res.used_line != null) parts.push(`Line ${Number(res.used_line).toFixed(1)}`);
-      parts.push(`Trend ${(res.p_trend*100).toFixed(1)}%`);
-      if (res.break_even_prob != null) parts.push(`Break-even ${(res.break_even_prob*100).toFixed(1)}%`);
-      const subtitle = parts.join(" • ");
+    const parts = [];
+    if (data.used_line != null) parts.push(`Line ${Number(data.used_line).toFixed(1)}`);
+    parts.push(`Trend ${(data.p_trend*100).toFixed(1)}%`);
+    if (data.break_even_prob != null) parts.push(`Break-even ${(data.break_even_prob*100).toFixed(1)}%`);
 
-      addResultCard({
-        title,
-        subtitle,
-        pTrend: res.p_trend || 0,
-        breakEven: res.break_even_prob,
-        tag: res.tag || "Fade"
-      });
-    }
-  }catch(_){
-    addResultCard({title:"Error", subtitle:"Request failed", pTrend:0, breakEven:null, tag:"Fade"});
+    addResultCard({
+      title,
+      subtitle: parts.join(" • "),
+      pTrend: data.p_trend || 0,
+      breakEven: data.break_even_prob,
+      tag: data.tag || "Fade"
+    });
+  }catch(err){
+    addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
   }finally{
     setLoading(false);
   }
@@ -257,22 +264,24 @@ async function loadTopPicks(){
   clearResults();
   setLoading(true);
   try{
-    const r = await fetch("/api/top/mlb?limit=12");
-    if(!r.ok){
-      const msg = `Top picks request failed (${r.status})`;
-      addResultCard({title:"Error", subtitle:msg, pTrend:0, breakEven:null, tag:"Fade"});
-      return;
-    }
-    const list = await r.json();
+    const list = await fetchJSON("/api/top/mlb?limit=12");
     if(Array.isArray(list) && list.length){
       for(const p of list) addTopCard(p);
     } else {
       addResultCard({title:"No picks", subtitle:"No FanDuel candidates within ±250 (or odds feed empty).", pTrend:0, breakEven:null, tag:"Fade"});
     }
-  }catch(e){
-    addResultCard({title:"Error", subtitle:"Could not load top picks", pTrend:0, breakEven:null, tag:"Fade"});
+  }catch(err){
+    addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
   }finally{
     setLoading(false);
   }
 }
+
+// wire top picks button if present
+topBtn?.addEventListener("click", loadTopPicks);
+
+// init
+setPropOptions(currentLeague);
+setLoading(false);
+
 
