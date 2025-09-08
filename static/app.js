@@ -57,7 +57,7 @@ function sparkSVG(arr){
   const w = 120, h = 26;
   const n = Array.isArray(arr) ? arr.length : 0;
   if(n === 0) return '';
-  const step = w / n;
+  const step = w / Math.max(1, n);
   let rects = '';
   for(let i=0;i<n;i++){
     const v = arr[i] ? 1 : 0;
@@ -76,7 +76,8 @@ function addTopCard(pick){
   const subtitle = [
     `Line ${Number(pick.line).toFixed(1)}`,
     `Trend ${(pick.p_trend*100).toFixed(1)}%`,
-    `Break-even ${(pick.break_even_prob*100).toFixed(1)}%`
+    `Break-even ${(pick.break_even_prob*100).toFixed(1)}%`,
+    `Edge ${(pick.edge*100).toFixed(1)}%`
   ].join(" • ");
   const svg = sparkSVG(pick.spark || []);
 
@@ -259,16 +260,16 @@ evalBtn.addEventListener("click", async ()=>{
   }
 });
 
-// Top Picks (MLB)
+// Top Picks (MLB) — use stricter defaults to surface real edges
 async function loadTopPicks(){
   clearResults();
   setLoading(true);
   try{
-    const list = await fetchJSON("/api/top/mlb?limit=12");
+    const list = await fetchJSON("/api/top/mlb?limit=12&min_edge=0.03&min_trend=0.57&events=10");
     if(Array.isArray(list) && list.length){
       for(const p of list) addTopCard(p);
     } else {
-      addResultCard({title:"No picks", subtitle:"No FanDuel candidates within ±250 (or odds feed empty).", pTrend:0, breakEven:null, tag:"Fade"});
+      addResultCard({title:"No picks", subtitle:"No positive-edge MLB props under current filters.", pTrend:0, breakEven:null, tag:"Fade"});
     }
   }catch(err){
     addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
@@ -283,5 +284,4 @@ topBtn?.addEventListener("click", loadTopPicks);
 // init
 setPropOptions(currentLeague);
 setLoading(false);
-
 
