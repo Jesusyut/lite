@@ -1,17 +1,9 @@
+# app.py
 from flask import Flask, request, jsonify, send_from_directory
-
-# MLB (free API)
-from services.mlb import todays_matchups, search_player as mlb_search_players, batter_trends_last10
-
-# NFL CSV fallback (no API cost)
-from services.nfl import last5_trends as csv_last5
-
-# NFL API-Sports (optional; cached + budgeted)
+from services.mlb import todays_matchups, search_player, batter_trends_last10, resolve_player_id
+from services.nfl import last5_trends
 try:
-    from services.nfl_apisports import (
-        search_player as nfl_api_search,
-        player_last5_trends as nfl_api_last5,
-    )
+    from services.nfl_apisports import search_player as api_search, player_last5_trends as api_last5
     HAVE_API = True
 except Exception:
     HAVE_API = False
@@ -19,129 +11,55 @@ except Exception:
 from utils.prob import american_to_prob
 from utils.price_source import resolve_shop_price, resolve_shop_quote
 
-
-app = Flask(__name__, static_url_path="", static_folder="static")
+app = Flask(__name__, static_url_path='', static_folder='static')
 
 @app.get("/")
 def root():
     return send_from_directory("static", "index.html")
 
-# -------- MLB --------
+# --- MLB ---
 @app.get("/api/mlb/today")
 def mlb_today():
     return jsonify(todays_matchups())
 
 @app.get("/api/mlb/search")
 def mlb_search():
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify([])
-    return jsonify(mlb_search_players(q)[:10])
+    q = request.args.get("q","").strip()
+    if not q: return jsonify([])
+    return jsonify(search_player(q)[:10])
 
 @app.get("/api/mlb/player/<int:pid>/trends")
 def mlb_player_trends(pid):
     return jsonify(batter_trends_last10(pid))
 
-@app.get("/api/top/mlb")
-def top_mlb():
-    """
-    Build MLB Top Picks from FanDuel odds + last-10 trends.
-    Returns a sorted list by (trend - break-even) edge.
-    """
-    limit = int(request.args.get("limit", "12"))
-    from services.odds_fanduel import list_fd_mlb_candidates
-    from services.mlb import search_player, batter_trends_last10
-
-    cands = list_fd_mlb_candidates()
-    id_cache: dict[str, int | None] = {}
-    picks = []
-
-    for c in cands:
-        name = c["player_name"]
-
-        # Resolve MLB player id (cache name lookups)
-        pid = id_cache.get(name)
-        if pid is None:
-            hits = search_player(name)
-            pid = hits[0]["id"] if hits else None
-            id_cache[name] = pid
-        if not pid:
-            continue
-
-        t = batter_trends_last10(pid)
-        if c["prop"] == "HITS_0_5":
-            p_trend = (t.get("hits_rate") or 0) / 100.0
-            spark = t.get("hits_series") or []
-        else:
-            p_trend = (t.get("tb2_rate") or 0) / 100.0
-            spark = t.get("tb2_series") or []
-
-        p_be = american_to_prob(c["american"])
-        if p_be is None or p_trend is None:
-            continue
-        edge = p_trend - p_be
-
-        tag = "Fade"
-        if p_trend >= 0.58:
-            tag = "Straight"
-        elif p_trend >= 0.52:
-            tag = "Parlay leg"
-
-        picks.append({
-            "player_id": pid,
-            "player_name": name,
-            "prop": c["prop"],
-            "line": c["line"],
-            "american": c["american"],
-            "break_even_prob": round(p_be, 4),
-            "p_trend": round(p_trend, 4),
-            "edge": round(edge, 4),
-            "tag": tag,
-            "spark": spark
-        })
-
-    picks.sort(key=lambda x: x["edge"], reverse=True)
-    return jsonify(picks[:limit])
-
-# -------- NFL --------
+# --- NFL ---
 @app.get("/api/nfl/player/search")
 def nfl_search():
-    """
-    Searches NFL players via API-Sports if available.
-    Falls back to empty list (CSV flow is name-based).
-    """
-    q = request.args.get("q", "").strip()
-    if not q or not HAVE_API:
-        return jsonify([])
+    q = request.args.get("q","").strip()
+    if not q or not HAVE_API: return jsonify([])
     try:
-        js = nfl_api_search(q)
-        out = []
+        js = api_search(q)
+        out=[]
         for r in js.get("response", []):
-            pid = r.get("id") or (r.get("player") or {}).get("id")
-            name = r.get("name") or (r.get("player") or {}).get("name")
-            if pid and name:
-                out.append({"id": pid, "name": name})
+            out.append({"id": r.get("id") or r.get("player",{}).get("id"),
+                        "name": r.get("name") or r.get("player",{}).get("name")})
         return jsonify(out[:10])
     except Exception:
         return jsonify([])
 
 @app.get("/api/nfl/player/<int:pid>/trends")
 def nfl_player_trends(pid):
-    """
-    If API-Sports present, return last-5 trends by player id/season.
-    Else, allow ?name= to use CSV fallback.
-    """
     season = int(request.args.get("season", "2024"))
     if HAVE_API:
         try:
-            return jsonify(nfl_api_last5(pid, season))
+            return jsonify(api_last5(pid, season))
         except Exception:
-            pass  # fall through to CSV
+            pass
+    # CSV fallback (name-based)
+    name = request.args.get("name","")
+    return jsonify(last5_trends(name))
 
-    name = request.args.get("name", "").strip()
-    return jsonify(csv_last5(name))
-
-# -------- Evaluate (shared) --------
+# --- Evaluation (shared) ---
 @app.post("/api/evaluate")
 def evaluate():
     """
@@ -159,7 +77,7 @@ def evaluate():
 
     used_line = None
 
-    # Auto-fill (line, price) from FanDuel if user left price blank
+    # Auto-fill price (line, american) from FanDuel if empty
     if american in (None, ""):
         got = resolve_shop_price(
             league=league,
@@ -192,11 +110,11 @@ def evaluate():
         name = j.get("player_name","")
         t = last5_trends(name)
         if prop == "REC":
-            p_trend = (t.get("rec_over35_rate")  or 0) / 100.0  # replace when you wire real thresholds
+            p_trend = (t.get("rec_over35_rate")  or 0) / 100.0
         elif prop == "RUSH_YDS":
             p_trend = (t.get("rush_over49_rate") or 0) / 100.0
         elif prop in ("REC_YDS","PASS_YDS"):
-            p_trend = 0.0  # placeholder until you add trend math
+            p_trend = 0.0  # placeholder until you add yards trend math
         else:
             return jsonify({"error":"bad nfl prop"}), 400
     else:
@@ -212,7 +130,8 @@ def evaluate():
         "used_line": used_line,
         "tag": tag
     })
- # --- Top Picks (MLB) ---
+
+# --- Top Picks (MLB) ---  (ONLY ONE definition — remove any duplicates!)
 @app.get("/api/top/mlb")
 def top_mlb():
     """
@@ -283,4 +202,8 @@ def top_mlb():
 
     picks.sort(key=lambda x: x["edge"], reverse=True)
     return jsonify(picks[:limit])
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
+
 
