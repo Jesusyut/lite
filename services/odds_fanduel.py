@@ -3,11 +3,9 @@ import os, requests
 from typing import Optional, Tuple, Dict, Any, List
 from utils.rcache import cached_fetch
 
-ODDS_BASE   = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports")
-ODDS_KEY    = os.getenv("ODDS_API_KEY")
-ODDS_MAX_ABS = float(os.getenv("ODDS_MAX_ABS", "250"))  # <= 250 by default
-
-# ---- helpers ----
+ODDS_BASE     = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports")
+ODDS_KEY      = os.getenv("ODDS_API_KEY")
+ODDS_MAX_ABS  = float(os.getenv("ODDS_MAX_ABS", "250"))  # inclusive
 
 def _price_ok(american) -> bool:
     try:
@@ -15,14 +13,9 @@ def _price_ok(american) -> bool:
     except Exception:
         return False
 
-# ---- Provider requests (edit here if your provider is different) ----
-
+# ---------- Provider calls ----------
 def _request_mlb_props() -> List[Dict[str, Any]]:
-    """
-    The Odds API format:
-      GET /baseball_mlb/odds?markets=player_hits,player_total_bases&
-          bookmakers=fanduel&regions=us&oddsFormat=american&apiKey=...
-    """
+    # GET /baseball_mlb/odds?markets=player_hits,player_total_bases&bookmakers=fanduel...
     if not ODDS_KEY:
         raise RuntimeError("ODDS_API_KEY missing")
     url = f"{ODDS_BASE}/baseball_mlb/odds"
@@ -40,9 +33,7 @@ def _request_mlb_props() -> List[Dict[str, Any]]:
     return cached_fetch("oddsfd", "/baseball_mlb/odds", params, call, ttl=900, stale_ttl=3*86400)
 
 def _request_nfl_props(markets_csv: str) -> List[Dict[str, Any]]:
-    """
-    Example for NFL props if you enable them later.
-    """
+    # GET /americanfootball_nfl/odds?markets=<csv>&bookmakers=fanduel...
     if not ODDS_KEY:
         raise RuntimeError("ODDS_API_KEY missing")
     url = f"{ODDS_BASE}/americanfootball_nfl/odds"
@@ -59,10 +50,9 @@ def _request_nfl_props(markets_csv: str) -> List[Dict[str, Any]]:
         return r.json()
     return cached_fetch("oddsfd", "/americanfootball_nfl/odds", params, call, ttl=900, stale_ttl=3*86400)
 
-# ---- Normalization / extraction ----
-
+# ---------- Normalize / extract ----------
 def _iter_fd_markets(rows: List[Dict[str, Any]]):
-    """Yield (market_key, market_dict) for FanDuel only."""
+    """Yield (market_key, market_dict) for FanDuel only across all events."""
     for ev in rows or []:
         for bm in ev.get("bookmakers", []):
             if str(bm.get("title","")).lower() != "fanduel":
@@ -71,9 +61,12 @@ def _iter_fd_markets(rows: List[Dict[str, Any]]):
                 yield m.get("key"), m
 
 def _extract_fd_outcome(market_key: str, market: Dict[str, Any],
-                        player_name: str, want_over: bool, target_line: float) -> Optional[Tuple[float,float]]:
+                        player_name: str, want_over: bool, target_line: float | None) -> Optional[Tuple[float,float]]:
     """
-    Returns (line, american) for the requested player+direction if price is within range.
+    Returns (line, american) for the requested player + Over/Under if:
+      - player matches, correct direction, and
+      - (if target_line provided) outcome point equals it, and
+      - |american| <= ODDS_MAX_ABS
     """
     pneedle = player_name.lower()
     for o in market.get("outcomes", []):
@@ -84,20 +77,21 @@ def _extract_fd_outcome(market_key: str, market: Dict[str, Any],
 
         is_over  = ("over"  in name.lower()) or (o.get("side","").lower() == "over")
         is_under = ("under" in name.lower()) or (o.get("side","").lower() == "under")
-        player_ok = (pneedle in desc.lower()) or (pneedle in name.lower())
         if want_over and not is_over: continue
         if not want_over and not is_under: continue
+
+        player_ok = (pneedle in desc.lower()) or (pneedle in name.lower())
         if not player_ok: continue
 
-        # match target line if present
-        if point is not None:
+        # Enforce line if given (MLB fixed); NFL: target_line is None so we accept market point.
+        if target_line is not None and point is not None:
             try:
                 if abs(float(point) - float(target_line)) > 1e-6:
                     continue
             except Exception:
                 pass
 
-        # extract american price
+        # price -> american
         american = None
         try:
             american = float(price)
@@ -108,27 +102,24 @@ def _extract_fd_outcome(market_key: str, market: Dict[str, Any],
                         try:
                             american = float(price[k]); break
                         except: pass
-        if american is None:
+        if american is None or not _price_ok(american):
             continue
 
-        # FILTER by |american| <= ODDS_MAX_ABS
-        if not _price_ok(american):
-            continue
-
-        # final line number
+        # determine line
         try:
-            line = float(point) if point is not None else float(target_line)
+            line = float(point) if point is not None else (float(target_line) if target_line is not None else 0.0)
         except Exception:
-            line = float(target_line)
+            line = float(target_line) if target_line is not None else 0.0
+
         return line, float(american)
     return None
 
-# ---- Public API ----
-
+# ---------- Public API ----------
 def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float,float]]:
     """
-    prop: 'HITS_0_5' or 'TB_1_5'
-    Returns: (line, american) for the Over, filtered to |american| <= ODDS_MAX_ABS; else None.
+    MLB fixed props:
+      HITS_0_5 -> player_hits @ 0.5 (Over)
+      TB_1_5   -> player_total_bases @ 1.5 (Over)
     """
     rows = _request_mlb_props()
     want_over = True
@@ -147,14 +138,30 @@ def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float,float]
             return got
     return None
 
-# Optional NFL hooks (filtered the same way). Enable when ready.
-def get_fd_nfl_price(player_name: str, market_key: str) -> Optional[Tuple[float,float]]:
+def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float,float]]:
+    """
+    NFL broader props (use market's current point):
+      REC      -> player_receptions
+      RUSH_YDS -> player_rushing_yards
+      REC_YDS  -> player_receiving_yards
+      PASS_YDS -> player_passing_yards
+    """
+    mapping = {
+        "REC":      "player_receptions",
+        "RUSH_YDS": "player_rushing_yards",
+        "REC_YDS":  "player_receiving_yards",
+        "PASS_YDS": "player_passing_yards",
+    }
+    market_key = mapping.get(prop)
+    if not market_key:
+        return None
+
     rows = _request_nfl_props(market_key)
     for key, m in _iter_fd_markets(rows):
         if key != market_key: 
             continue
-        # For NFL we often don't know target_line ahead of time; pass 0 and don't enforce line equality.
-        got = _extract_fd_outcome(key, m, player_name=player_name, want_over=True, target_line=0.0)
+        # target_line=None -> accept the market's own point
+        got = _extract_fd_outcome(key, m, player_name=player_name, want_over=True, target_line=None)
         if got:
             return got
     return None
