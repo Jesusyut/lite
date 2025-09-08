@@ -165,3 +165,55 @@ def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float,float]
         if got:
             return got
     return None
+def list_fd_mlb_candidates() -> List[Dict[str, Any]]:
+    """
+    Return all FanDuel MLB Over outcomes for hits(0.5)/total bases(1.5)
+    within the |american| <= ODDS_MAX_ABS filter:
+      [{player_name, prop, line, american}]
+    """
+    rows = _request_mlb_props()
+    out: List[Dict[str, Any]] = []
+    for key, m in _iter_fd_markets(rows):
+        if key not in ("player_hits", "player_total_bases"):
+            continue
+        target = 0.5 if key == "player_hits" else 1.5
+        prop   = "HITS_0_5" if key == "player_hits" else "TB_1_5"
+        for o in m.get("outcomes", []):
+            name = str(o.get("name",""))
+            desc = str(o.get("description") or o.get("participant") or o.get("player") or "")
+            point = o.get("point", o.get("line"))
+            price = o.get("price", o.get("odds_american", o.get("american")))
+            # Only Over
+            is_over = ("over" in name.lower()) or (o.get("side","").lower() == "over")
+            if not is_over: 
+                continue
+            # Line must match target
+            try:
+                if point is None or abs(float(point) - float(target)) > 1e-6:
+                    continue
+            except Exception:
+                continue
+            # American price
+            american = None
+            try:
+                american = float(price)
+            except Exception:
+                if isinstance(price, dict):
+                    for k in ("american","price","odds_american"):
+                        if k in price:
+                            try:
+                                american = float(price[k]); break
+                            except: pass
+            if american is None or not _price_ok(american):
+                continue
+            # Extract a player display name: remove "Over " prefix if mixed into name
+            player_name = desc.strip() or re.sub(r'(?i)\bover\b', '', name).strip()
+            if not player_name:
+                continue
+            out.append({
+                "player_name": player_name,
+                "prop": prop,
+                "line": float(target),
+                "american": float(american),
+            })
+    return out
