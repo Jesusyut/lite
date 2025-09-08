@@ -112,7 +112,7 @@ def evaluate():
         from utils.prob import american_to_prob
         p_break_even = american_to_prob(american) if american not in (None, "") else None
         
-              if league == "mlb":
+         if league == "mlb":
             from services.mlb import batter_trends_last10, resolve_player_id
         
             name = (j.get("player_name") or "").strip()
