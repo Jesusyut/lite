@@ -18,6 +18,22 @@ def _to_float(x, default=None):
     try: return float(x)
     except Exception: return default
 
+# ----------------- safe cache wrapper -----------------
+def _safe_cached_fetch(ns: str, key: str, params: dict, call, *, ttl=120, stale_ttl=600):
+    """
+    Wrap cached_fetch so that if the cache layer refuses to call out due to
+    a local 'budget exhausted' condition, we still make ONE provider call to
+    seed the response and avoid 502s.
+    """
+    try:
+        return cached_fetch(ns, key, params, call, ttl=ttl, stale_ttl=stale_ttl)
+    except Exception as e:
+        msg = str(e).lower()
+        if "budget" in msg and "exhaust" in msg:
+            # Fail-open just for Odds API; next cycle the normal cache can store it.
+            return call()
+        raise
+
 # ----------------- low-level fetchers -----------------
 def _get_events(sport_key: str, limit: int) -> List[Dict[str, Any]]:
     """GET /{sport}/events"""
@@ -29,7 +45,7 @@ def _get_events(sport_key: str, limit: int) -> List[Dict[str, Any]]:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         return r.json()
-    evs = cached_fetch("oddsfd", f"/{sport_key}/events", params, call, ttl=120, stale_ttl=600)
+    evs = _safe_cached_fetch("oddsfd", f"/{sport_key}/events", params, call, ttl=120, stale_ttl=600)
     # Sort by commence_time so we scan near-term games first
     try:
         evs = sorted(evs, key=lambda e: e.get("commence_time",""))
@@ -53,7 +69,7 @@ def _get_event_odds(sport_key: str, event_id: str, markets_csv: str) -> Dict[str
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         return r.json()
-    return cached_fetch("oddsfd", f"/{sport_key}/events/{event_id}/odds", params, call, ttl=120, stale_ttl=600)
+    return _safe_cached_fetch("oddsfd", f"/{sport_key}/events/{event_id}/odds", params, call, ttl=120, stale_ttl=600)
 
 def _iter_fd_markets(js: Dict[str, Any], allowed: set[str]):
     for bm in js.get("bookmakers", []):
@@ -115,7 +131,8 @@ def list_fd_mlb_candidates(max_events: int = 8, per_event_cap: int = 30) -> List
       markets: batter_hits (0.5), batter_total_bases (1.5)
       returns [{player_name, prop, line, american}]
     """
-    events = _get_events("baseball_mlb", max_events=max_events)
+    # IMPORTANT: _get_events takes 'limit', not 'max_events'
+    events = _get_events("baseball_mlb", limit=max_events)
     all_lists: List[List[Dict[str, Any]]] = []
 
     for ev in events:
@@ -154,67 +171,24 @@ def list_fd_mlb_candidates(max_events: int = 8, per_event_cap: int = 30) -> List
         i += 1
     return merged
 
-def list_fd_mlb_candidates(max_events: int = 8, per_event_cap: int = 30) -> List[Dict[str, Any]]:
+def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
     """
-    Round-robin list of MLB candidates across upcoming events:
-      markets: batter_hits (0.5), batter_total_bases (1.5)
-      returns [{player_name, prop, line, american}]
+    Try to find an FD price for a specific MLB player & prop across near-term events.
+    Returns (line, american) or None.
     """
-    # ✅ FIX: use limit=max_events (not max_events=...)
-    events = _get_events("baseball_mlb", limit=max_events)
+    target = 0.5 if prop == "HITS_0_5" else 1.5 if prop == "TB_1_5" else None
+    key    = "batter_hits" if prop == "HITS_0_5" else "batter_total_bases" if prop == "TB_1_5" else None
+    if target is None or key is None:
+        return None
 
-    all_lists: List[List[Dict[str, Any]]] = []
-
-    for ev in events:
-        js = _get_event_odds("baseball_mlb", ev["id"], "batter_hits,batter_total_bases")
-        per_ev: List[Dict[str, Any]] = []
-
-        for key, m in _iter_fd_markets(js, {"batter_hits", "batter_total_bases"}):
-            target = 0.5 if key == "batter_hits" else 1.5
-            prop   = "HITS_0_5" if key == "batter_hits" else "TB_1_5"
-            for o in m.get("outcomes", []):
-                name = str(o.get("name","")).lower()
-                side = str(o.get("side","")).lower()
-                if "over" not in name and side != "over":
-                    continue
-                point = o.get("point", o.get("line"))
-                line = float(point) if point is not None else target
-                if abs(line - target) > 1e-6:
-                    continue
-                american = _american_from_price(o.get("price", o.get("odds_american", o.get("american"))))
-                if american is None or not _price_ok(american):
-                    continue
-                desc = str(o.get("description") or o.get("participant") or o.get("player") or "").strip()
-                if not desc:
-                    continue
-                per_ev.append({
-                    "player_name": desc,
-                    "prop": prop,
-                    "line": float(line),
-                    "american": float(american),
-                })
-                if len(per_ev) >= per_event_cap:
-                    break
-            if len(per_ev) >= per_event_cap:
-                break
-
-        if per_ev:
-            all_lists.append(per_ev)
-
-    # round-robin merge so one game can’t dominate
-    merged: List[Dict[str, Any]] = []
-    i = 0
-    while True:
-        progressed = False
-        for lst in all_lists:
-            if i < len(lst):
-                merged.append(lst[i])
-                progressed = True
-        if not progressed:
-            break
-        i += 1
-    return merged
-
+    needle = player_name.lower()
+    for ev in _get_events("baseball_mlb", limit=10):
+        js = _get_event_odds("baseball_mlb", ev["id"], key)
+        for _, m in _iter_fd_markets(js, {key}):
+            for player, line, american in _extract_batter_outcomes(key, m, target):
+                if needle in player.lower():
+                    return line, american
+    return None
 
 # ----------------- NFL quotes -----------------
 _NFL_MAP = {
@@ -234,7 +208,7 @@ def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float
     sport_key, market_key = tup
     needle = player_name.lower()
 
-    for ev in _get_events(sport_key, 8):
+    for ev in _get_events(sport_key, limit=8):
         js = _get_event_odds(sport_key, ev["id"], market_key)
         for _, m in _iter_fd_markets(js, {market_key}):
             for o in m.get("outcomes", []):
@@ -255,6 +229,5 @@ def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float
                 line = _to_float(o.get("point", o.get("line")), 0.0)
                 return float(line), float(american)
     return None
-
 
 
