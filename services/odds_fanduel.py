@@ -165,11 +165,15 @@ def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float,float]
         if got:
             return got
     return None
+# ---------- Public: candidate list for "Top Picks" (MLB) ----------
 def list_fd_mlb_candidates() -> List[Dict[str, Any]]:
     """
     Return all FanDuel MLB Over outcomes for hits(0.5)/total bases(1.5)
     within the |american| <= ODDS_MAX_ABS filter:
       [{player_name, prop, line, american}]
+    Notes:
+      - Accept outcomes even if outcome['point'] is missing; fall back to the target.
+      - Still require "Over".
     """
     rows = _request_mlb_props()
     out: List[Dict[str, Any]] = []
@@ -178,42 +182,54 @@ def list_fd_mlb_candidates() -> List[Dict[str, Any]]:
             continue
         target = 0.5 if key == "player_hits" else 1.5
         prop   = "HITS_0_5" if key == "player_hits" else "TB_1_5"
+
         for o in m.get("outcomes", []):
-            name = str(o.get("name",""))
+            name = str(o.get("name", ""))  # often "Over" / "Under"
             desc = str(o.get("description") or o.get("participant") or o.get("player") or "")
             point = o.get("point", o.get("line"))
             price = o.get("price", o.get("odds_american", o.get("american")))
-            # Only Over
-            is_over = ("over" in name.lower()) or (o.get("side","").lower() == "over")
-            if not is_over: 
+
+            # Over only
+            is_over = ("over" in name.lower()) or (o.get("side", "").lower() == "over")
+            if not is_over:
                 continue
-            # Line must match target
-            try:
-                if point is None or abs(float(point) - float(target)) > 1e-6:
-                    continue
-            except Exception:
-                continue
-            # American price
+
+            # Price (american) with ±ODDS_MAX_ABS filter
             american = None
             try:
                 american = float(price)
             except Exception:
                 if isinstance(price, dict):
-                    for k in ("american","price","odds_american"):
+                    for k in ("american", "price", "odds_american"):
                         if k in price:
                             try:
                                 american = float(price[k]); break
                             except: pass
             if american is None or not _price_ok(american):
                 continue
-            # Extract a player display name: remove "Over " prefix if mixed into name
-            player_name = desc.strip() or re.sub(r'(?i)\bover\b', '', name).strip()
+
+            # Line: accept missing 'point' (many payloads omit it) and fall back to target
+            try:
+                if point is None:
+                    line = float(target)
+                else:
+                    line = float(point)
+                    # If a point exists but differs wildly from target, skip
+                    if abs(line - float(target)) > 1.0:  # allow tiny drift; TB can sometimes show 1.5/2.5
+                        continue
+            except Exception:
+                line = float(target)
+
+            # Player display name
+            player_name = (desc or name).replace("Over", "").strip()
             if not player_name:
                 continue
+
             out.append({
                 "player_name": player_name,
                 "prop": prop,
-                "line": float(target),
+                "line": float(line),
                 "american": float(american),
             })
     return out
+
