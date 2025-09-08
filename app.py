@@ -147,89 +147,140 @@ def evaluate():
     """
     body:
       league: 'mlb'|'nfl'
-      prop:
-        MLB -> 'HITS_0_5'|'TB_1_5'
-        NFL -> 'REC'|'RUSH_YDS'|'REC_YDS'|'PASS_YDS'   (broader props)
-      player_id (mlb or nfl when using API) OR player_name (nfl CSV fallback)
-      american (optional, e.g., -120)  # if missing, we'll fetch FD price (±250 filter)
-      season (optional, nfl; default 2024)
+      prop:   MLB 'HITS_0_5'|'TB_1_5'
+              NFL 'REC'|'RUSH_YDS'|'REC_YDS'|'PASS_YDS'
+      player_id (mlb) or player_name (nfl)
+      american (optional)
     """
     j = request.get_json() or {}
-    league = j.get("league")
-    prop   = j.get("prop")
-    american = j.get("american")
+    league   = j.get("league")
+    prop     = j.get("prop")
+    american = j.get("american", None)
+
     used_line = None
 
-    # 1) Try to fetch FanDuel line+price if user left price blank (and sometimes for line discovery)
-    quote = None
+    # Auto-fill (line, price) from FanDuel if user left price blank
     if american in (None, ""):
-        quote = resolve_shop_quote(league=league, prop=prop, player_name=j.get("player_name"))
-        if quote:
-            american = quote.get("american")
-            used_line = quote.get("line")
+        got = resolve_shop_price(
+            league=league,
+            prop=prop,
+            player_name=j.get("player_name"),
+            player_id=j.get("player_id"),
+        )
+        if got:
+            used_line, american = got
 
-    # 2) Break-even from price (if any)
-    from utils.prob import american_to_prob
     p_break_even = american_to_prob(american) if american not in (None, "") else None
 
-    # 3) Compute trend probability (MLB fixed, NFL broader/dynamic)
     if league == "mlb":
-        from services.mlb import batter_trends_last10
-        if not j.get("player_id"):
-            return jsonify({"error": "player_id required for mlb"}), 400
-        t = batter_trends_last10(int(j["player_id"]))
+        pid = j.get("player_id")
+        if not pid:
+            nm = j.get("player_name", "")
+            pid = resolve_player_id(nm)
+            if not pid:
+                return jsonify({"error":"MLB player could not be resolved"}), 400
+
+        t = batter_trends_last10(int(pid))
         if prop == "HITS_0_5":
             p_trend = (t.get("hits_rate") or 0) / 100.0
-            used_line = used_line or 0.5
         elif prop == "TB_1_5":
-            p_trend = (t.get("tb2_rate") or 0) / 100.0
-            used_line = used_line or 1.5
+            p_trend = (t.get("tb2_rate")  or 0) / 100.0
         else:
-            return jsonify({"error": "bad mlb prop"}), 400
+            return jsonify({"error":"bad mlb prop"}), 400
 
     elif league == "nfl":
-        season = int(j.get("season", 2024))
-        # Map prop -> metric; default lines if no quote available
-        metric_defaults = {
-            "REC": 3.5,
-            "RUSH_YDS": 49.5,
-            "REC_YDS": 49.5,
-            "PASS_YDS": 249.5,
-        }
-        metric = prop
-        used_line = float(used_line if used_line is not None else metric_defaults.get(metric, 0.0))
-
-        # Prefer API-Sports when we have player_id + API
-        t = {}
-        if 'player_id' in j and j['player_id'] and HAVE_API:
-            try:
-                from services.nfl_apisports import player_last5_dynamic
-                t = player_last5_dynamic(int(j["player_id"]), season, metric, used_line)
-            except Exception:
-                t = {}
-        if not t:
-            # CSV fallback by player_name
-            from services.nfl import last5_dynamic
-            t = last5_dynamic(j.get("player_name","") or "", metric, used_line)
-
-        p_trend = (t.get("rate") or 0) / 100.0
-        if p_trend == 0 and t.get("n",0) == 0:
-            return jsonify({"error":"No recent games for this player"}), 404
-
+        name = j.get("player_name","")
+        t = last5_trends(name)
+        if prop == "REC":
+            p_trend = (t.get("rec_over35_rate")  or 0) / 100.0  # replace when you wire real thresholds
+        elif prop == "RUSH_YDS":
+            p_trend = (t.get("rush_over49_rate") or 0) / 100.0
+        elif prop in ("REC_YDS","PASS_YDS"):
+            p_trend = 0.0  # placeholder until you add trend math
+        else:
+            return jsonify({"error":"bad nfl prop"}), 400
     else:
-        return jsonify({"error": "bad league"}), 400
+        return jsonify({"error":"bad league"}), 400
 
-    # 4) Tag
     tag = "Fade"
-    if p_trend >= 0.58:
-        tag = "Straight"
-    elif p_trend >= 0.52:
-        tag = "Parlay leg"
+    if p_trend >= 0.58: tag = "Straight"
+    elif p_trend >= 0.52: tag = "Parlay leg"
 
     return jsonify({
         "p_trend": round(p_trend, 4),
         "break_even_prob": round(p_break_even, 4) if p_break_even is not None else None,
-        "tag": tag,
         "used_line": used_line,
-        "price_source": ("FanDuel" if quote else None)
+        "tag": tag
     })
+ # --- Top Picks (MLB) ---
+@app.get("/api/top/mlb")
+def top_mlb():
+    """
+    Build MLB Top Picks from FanDuel batter props + last-10 trends.
+    Safety rails:
+      - ?limit= (default 12, max 24)
+      - ?max_cands= (default 40)
+      - ?budget_s= (default 8.0 total loop time)
+    """
+    import time
+    from services.odds_fanduel import list_fd_mlb_candidates
+
+    limit = min(max(int(request.args.get("limit", "12")), 1), 24)
+    max_cands = min(max(int(request.args.get("max_cands", "40")), 5), 200)
+    budget_s = float(request.args.get("budget_s", "8.0"))
+
+    t0 = time.time()
+    try:
+        cands = list_fd_mlb_candidates()
+    except Exception as e:
+        return jsonify({"error": f"odds fetch failed: {e}"}), 502
+
+    cands = cands[:max_cands]
+    picks = []
+
+    for c in cands:
+        if len(picks) >= limit or (time.time() - t0) > budget_s:
+            break
+
+        name = c["player_name"]
+        pid = resolve_player_id(name)
+        if not pid:
+            continue
+
+        try:
+            t = batter_trends_last10(pid)
+        except Exception:
+            continue
+
+        if c["prop"] == "HITS_0_5":
+            p_trend = (t.get("hits_rate") or 0) / 100.0
+            spark = t.get("hits_series") or []
+        else:
+            p_trend = (t.get("tb2_rate") or 0) / 100.0
+            spark = t.get("tb2_series") or []
+
+        p_be = american_to_prob(c["american"])
+        if p_be is None:
+            continue
+        edge = p_trend - p_be
+
+        tag = "Fade"
+        if p_trend >= 0.58: tag = "Straight"
+        elif p_trend >= 0.52: tag = "Parlay leg"
+
+        picks.append({
+            "player_id": pid,
+            "player_name": name,
+            "prop": c["prop"],
+            "line": float(c["line"]),
+            "american": float(c["american"]),
+            "break_even_prob": round(p_be, 4),
+            "p_trend": round(p_trend, 4),
+            "edge": round(edge, 4),
+            "tag": tag,
+            "spark": spark
+        })
+
+    picks.sort(key=lambda x: x["edge"], reverse=True)
+    return jsonify(picks[:limit])
+
