@@ -164,7 +164,7 @@ def top_mlb():
     from services.mlb import resolve_player_id, batter_trends_last10
     from utils.prob import american_to_prob
 
-    # --- knobs ---
+    # --- knobs (all local to this function) ---
     limit         = min(max(int(request.args.get("limit", "12")), 1), 24)
     max_cands     = min(max(int(request.args.get("max_cands", "40")), 5), 200)
     budget_s      = float(request.args.get("budget_s", "8.0"))
@@ -176,11 +176,16 @@ def top_mlb():
 
     t0 = time.time()
 
-    # --- odds → round-robin candidate list across events ---
+    # --- odds → round-robin candidates across multiple events ---
     try:
-        cands = list_fd_mlb_candidates(max_events=events, per_event_cap=per_event_cap)[:max_cands]
+        cands = list_fd_mlb_candidates(
+            max_events=events, 
+            per_event_cap=per_event_cap
+        )
     except Exception as e:
         return jsonify({"error": f"odds fetch failed: {e}"}), 502
+
+    cands = cands[:max_cands]
 
     picks = []
     for c in cands:
@@ -210,14 +215,13 @@ def top_mlb():
 
         edge = p_trend - p_be
 
-        # --- filters (only show true "picks") ---
+        # only include positive-edge picks unless overridden
         if not allow_neg:
             if p_trend < min_trend:
                 continue
             if edge < min_edge:
                 continue
 
-        # Tag stays trend-based (simple/readable)
         tag = "Fade"
         if p_trend >= 0.58: tag = "Straight"
         elif p_trend >= 0.52: tag = "Parlay leg"
@@ -237,3 +241,4 @@ def top_mlb():
 
     picks.sort(key=lambda x: x["edge"], reverse=True)
     return jsonify(picks[:limit])
+
