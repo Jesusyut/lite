@@ -28,11 +28,28 @@ def mlb_today():
 def mlb_search():
     q = request.args.get("q","").strip()
     if not q: return jsonify([])
-    return jsonify(search_player(q)[:10])
+    try:
+        return jsonify(search_player(q)[:10])
+    except Exception:
+        return jsonify([])
 
 @app.get("/api/mlb/player/<int:pid>/trends")
 def mlb_player_trends(pid):
-    return jsonify(batter_trends_last10(pid))
+    # allow optional name for API-Sports id resolution
+    nm = request.args.get("name","").strip() or None
+    try:
+        d = batter_trends_last10(pid, player_name=nm)
+        d = d or {}
+        return jsonify({
+            "n": d.get("n", 0),
+            "hits_rate": float(d.get("hits_rate") or 0.0),
+            "tb2_rate":  float(d.get("tb2_rate")  or 0.0),
+            "hits_series": d.get("hits_series") or [],
+            "tb2_series":  d.get("tb2_series")  or [],
+        })
+    except Exception:
+        return jsonify({"n": 0, "hits_rate": 0.0, "tb2_rate": 0.0, "hits_series": [], "tb2_series": []})
+
 
 # --- NFL ---
 @app.get("/api/nfl/player/search")
