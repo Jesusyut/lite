@@ -42,6 +42,67 @@ def mlb_search():
 def mlb_player_trends(pid):
     return jsonify(batter_trends_last10(pid))
 
+@app.get("/api/top/mlb")
+def top_mlb():
+    """
+    Build MLB Top Picks from FanDuel odds + last-10 trends.
+    Returns a sorted list by (trend - break-even) edge.
+    """
+    limit = int(request.args.get("limit", "12"))
+    from services.odds_fanduel import list_fd_mlb_candidates
+    from services.mlb import search_player, batter_trends_last10
+
+    cands = list_fd_mlb_candidates()
+    id_cache: dict[str, int | None] = {}
+    picks = []
+
+    for c in cands:
+        name = c["player_name"]
+
+        # Resolve MLB player id (cache name lookups)
+        pid = id_cache.get(name)
+        if pid is None:
+            hits = search_player(name)
+            pid = hits[0]["id"] if hits else None
+            id_cache[name] = pid
+        if not pid:
+            continue
+
+        t = batter_trends_last10(pid)
+        if c["prop"] == "HITS_0_5":
+            p_trend = (t.get("hits_rate") or 0) / 100.0
+            spark = t.get("hits_series") or []
+        else:
+            p_trend = (t.get("tb2_rate") or 0) / 100.0
+            spark = t.get("tb2_series") or []
+
+        p_be = american_to_prob(c["american"])
+        if p_be is None or p_trend is None:
+            continue
+        edge = p_trend - p_be
+
+        tag = "Fade"
+        if p_trend >= 0.58:
+            tag = "Straight"
+        elif p_trend >= 0.52:
+            tag = "Parlay leg"
+
+        picks.append({
+            "player_id": pid,
+            "player_name": name,
+            "prop": c["prop"],
+            "line": c["line"],
+            "american": c["american"],
+            "break_even_prob": round(p_be, 4),
+            "p_trend": round(p_trend, 4),
+            "edge": round(edge, 4),
+            "tag": tag,
+            "spark": spark
+        })
+
+    picks.sort(key=lambda x: x["edge"], reverse=True)
+    return jsonify(picks[:limit])
+
 # -------- NFL --------
 @app.get("/api/nfl/player/search")
 def nfl_search():
