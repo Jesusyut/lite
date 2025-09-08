@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.rcache import cached_fetch
 
 # ----------------- config -----------------
-ODDS_BASE = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports").rstrip("/")
+_RAW_BASE = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4").rstrip("/")
+ODDS_BASE = _RAW_BASE if _RAW_BASE.endswith("/sports") else (_RAW_BASE + "/sports")
 ODDS_KEY  = os.getenv("ODDS_API_KEY")
 ODDS_MAX_ABS = float(os.getenv("ODDS_MAX_ABS", "250"))  # ± cap for prices
 
