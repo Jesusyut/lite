@@ -3,144 +3,199 @@ import os, requests
 from typing import Optional, Tuple, Dict, Any, List
 from utils.rcache import cached_fetch
 
-ODDS_BASE     = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports")
-ODDS_KEY      = os.getenv("ODDS_API_KEY")
-ODDS_MAX_ABS  = float(os.getenv("ODDS_MAX_ABS", "250"))  # inclusive
+# -------------------- Config --------------------
+ODDS_BASE       = os.getenv("ODDS_BASE", "https://api.the-odds-api.com/v4/sports")
+ODDS_KEY        = os.getenv("ODDS_API_KEY")
+ODDS_REGION     = os.getenv("ODDS_REGION", "us")
+ODDS_MAX_ABS    = float(os.getenv("ODDS_MAX_ABS", "250"))          # inclusive
+USE_EVENTWISE   = os.getenv("ODDS_EVENTWISE", "0") == "1"          # 1 => /events + /event-odds
+EVENTS_MAX      = int(os.getenv("ODDS_EVENTS_MAX", "14"))          # only used in event-wise mode
+ODDS_TIMEOUT_S  = float(os.getenv("ODDS_TIMEOUT_S", "20"))
 
-def _price_ok(american) -> bool:
+def _price_ok(american: float) -> bool:
     try:
         return abs(float(american)) <= ODDS_MAX_ABS
     except Exception:
         return False
 
-# ---------- Provider calls ----------
-def _request_mlb_props() -> List[Dict[str, Any]]:
-    # GET /baseball_mlb/odds?markets=player_hits,player_total_bases&bookmakers=fanduel...
+# -------------------- HTTP helpers --------------------
+def _req(path: str, params: Dict[str, Any], *, ttl=600):
     if not ODDS_KEY:
         raise RuntimeError("ODDS_API_KEY missing")
-    url = f"{ODDS_BASE}/baseball_mlb/odds"
-    params = {
-        "markets": "player_hits,player_total_bases",
-        "bookmakers": "fanduel",
-        "regions": "us",
-        "oddsFormat": "american",
-        "apiKey": ODDS_KEY,
-    }
+    p = dict(params or {})
+    p["apiKey"] = ODDS_KEY
+    url = f"{ODDS_BASE}{path}"
+
     def call():
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(url, params=p, timeout=ODDS_TIMEOUT_S)
         r.raise_for_status()
         return r.json()
-    return cached_fetch("oddsfd", "/baseball_mlb/odds", params, call, ttl=900, stale_ttl=3*86400)
 
+    # cache fresh + allow stale for resiliency
+    return cached_fetch("oddsfd", path, p, call, ttl=ttl, stale_ttl=3 * 86400)
+
+# ---- MLB bulk ----
+def _request_mlb_props_bulk() -> List[Dict[str, Any]]:
+    return _req(
+        "/baseball_mlb/odds",
+        {
+            "regions": ODDS_REGION,
+            "bookmakers": "fanduel",
+            "markets": "player_hits,player_total_bases",
+            "oddsFormat": "american",
+        },
+        ttl=600,
+    )
+
+# ---- MLB event-wise ----
+def _request_events_mlb() -> List[Dict[str, Any]]:
+    # events endpoint: lightweight list of events (per docs)
+    return _req("/baseball_mlb/events", {}, ttl=300)
+
+def _request_event_odds_mlb(event_id: str, markets_csv: str) -> Dict[str, Any]:
+    return _req(
+        f"/baseball_mlb/events/{event_id}/odds",
+        {
+            "regions": ODDS_REGION,
+            "bookmakers": "fanduel",
+            "markets": markets_csv,  # e.g., "player_hits,player_total_bases"
+            "oddsFormat": "american",
+        },
+        ttl=600,
+    )
+
+# ---- NFL bulk (broader props) ----
 def _request_nfl_props(markets_csv: str) -> List[Dict[str, Any]]:
-    # GET /americanfootball_nfl/odds?markets=<csv>&bookmakers=fanduel...
-    if not ODDS_KEY:
-        raise RuntimeError("ODDS_API_KEY missing")
-    url = f"{ODDS_BASE}/americanfootball_nfl/odds"
-    params = {
-        "markets": markets_csv,
-        "bookmakers": "fanduel",
-        "regions": "us",
-        "oddsFormat": "american",
-        "apiKey": ODDS_KEY,
-    }
-    def call():
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        return r.json()
-    return cached_fetch("oddsfd", "/americanfootball_nfl/odds", params, call, ttl=900, stale_ttl=3*86400)
+    return _req(
+        "/americanfootball_nfl/odds",
+        {
+            "regions": ODDS_REGION,
+            "bookmakers": "fanduel",
+            "markets": markets_csv,
+            "oddsFormat": "american",
+        },
+        ttl=600,
+    )
 
-# ---------- Normalize / extract ----------
-def _iter_fd_markets(rows: List[Dict[str, Any]]):
-    """Yield (market_key, market_dict) for FanDuel only across all events."""
-    for ev in rows or []:
-        for bm in ev.get("bookmakers", []):
-            if str(bm.get("title","")).lower() != "fanduel":
+# -------------------- Schema iterators / parsing --------------------
+def _iter_fd_markets(events: List[Dict[str, Any]]):
+    """
+    Iterate FanDuel markets across a list of event objects.
+    Accepts both bulk-odds (list-of-events) and event-odds (single-event) shapes.
+    Yields (market_key, market_dict).
+    """
+    for ev in events or []:
+        for bm in ev.get("bookmakers", []) or []:
+            # v4 has both key ('fanduel') and title ('FanDuel'); accept either
+            bk = (bm.get("key") or bm.get("title") or "").lower()
+            if bk != "fanduel":
                 continue
-            for m in bm.get("markets", []):
+            for m in bm.get("markets", []) or []:
                 yield m.get("key"), m
 
-def _extract_fd_outcome(market_key: str, market: Dict[str, Any],
-                        player_name: str, want_over: bool, target_line: float | None) -> Optional[Tuple[float,float]]:
+def _pull_outcome(o: Dict[str, Any]) -> Optional[Tuple[str, str, Optional[float], float]]:
     """
-    Returns (line, american) for the requested player + Over/Under if:
-      - player matches, correct direction, and
-      - (if target_line provided) outcome point equals it, and
-      - |american| <= ODDS_MAX_ABS
+    Parse a single outcome using the v4 schema fields:
+        name         -> 'Over' / 'Under'
+        description  -> player name (for player props)
+        point        -> line (float or None)
+        price        -> american odds when oddsFormat=american
+    Returns (side, player_name, line_or_None, american) or None if invalid/out-of-range.
     """
-    pneedle = player_name.lower()
-    for o in market.get("outcomes", []):
-        name = str(o.get("name",""))
-        desc = str(o.get("description") or o.get("participant") or o.get("player") or "")
-        point = o.get("point", o.get("line"))
-        price = o.get("price", o.get("odds_american", o.get("american")))
+    name = str(o.get("name", "")).strip()
+    # player descriptor lives here for player props
+    desc = str(o.get("description") or o.get("participant") or o.get("player") or "").strip()
+    point = o.get("point", None)
+    price = o.get("price", None)
 
-        is_over  = ("over"  in name.lower()) or (o.get("side","").lower() == "over")
-        is_under = ("under" in name.lower()) or (o.get("side","").lower() == "under")
-        if want_over and not is_over: continue
-        if not want_over and not is_under: continue
+    if not name or not desc or price is None:
+        return None
 
-        player_ok = (pneedle in desc.lower()) or (pneedle in name.lower())
-        if not player_ok: continue
+    side = name.lower()
+    if "over" not in side and "under" not in side:
+        return None
 
-        # Enforce line if given (MLB fixed); NFL: target_line is None so we accept market point.
-        if target_line is not None and point is not None:
-            try:
-                if abs(float(point) - float(target_line)) > 1e-6:
-                    continue
-            except Exception:
-                pass
+    # odds are already american when oddsFormat=american
+    try:
+        american = float(price)
+    except Exception:
+        # some providers nest alt keys
+        if isinstance(price, dict):
+            for k in ("american", "odds_american", "price"):
+                if k in price:
+                    try:
+                        american = float(price[k]); break
+                    except Exception:
+                        pass
+            else:
+                return None
+        else:
+            return None
 
-        # price -> american
-        american = None
-        try:
-            american = float(price)
-        except Exception:
-            if isinstance(price, dict):
-                for k in ("american","price","odds_american"):
-                    if k in price:
-                        try:
-                            american = float(price[k]); break
-                        except: pass
-        if american is None or not _price_ok(american):
-            continue
+    if not _price_ok(american):
+        return None
 
-        # determine line
-        try:
-            line = float(point) if point is not None else (float(target_line) if target_line is not None else 0.0)
-        except Exception:
-            line = float(target_line) if target_line is not None else 0.0
+    try:
+        ln = float(point) if point is not None else None
+    except Exception:
+        ln = None
 
-        return line, float(american)
-    return None
+    return ("over" if "over" in side else "under", desc, ln, float(american))
 
-# ---------- Public API ----------
-def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float,float]]:
+# -------------------- Public: MLB price lookup --------------------
+def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
     """
-    MLB fixed props:
+    MLB:
       HITS_0_5 -> player_hits @ 0.5 (Over)
       TB_1_5   -> player_total_bases @ 1.5 (Over)
     """
-    rows = _request_mlb_props()
-    want_over = True
-    if prop == "HITS_0_5":
-        market_key = "player_hits"; target = 0.5
-    elif prop == "TB_1_5":
-        market_key = "player_total_bases"; target = 1.5
-    else:
+    market_key = {"HITS_0_5": "player_hits", "TB_1_5": "player_total_bases"}.get(prop)
+    target = 0.5 if prop == "HITS_0_5" else (1.5 if prop == "TB_1_5" else None)
+    if not market_key or target is None:
         return None
 
+    # source rows (bulk or event-wise)
+    rows: List[Dict[str, Any]] = []
+    if USE_EVENTWISE:
+        evs = _request_events_mlb() or []
+        for ev in evs[:max(1, EVENTS_MAX)]:
+            ev_id = ev.get("id")
+            if not ev_id:
+                continue
+            data = _request_event_odds_mlb(ev_id, market_key)
+            if data and isinstance(data, dict):
+                rows.append(data)
+    else:
+        rows = _request_mlb_props_bulk()
+
+    # scan for player outcome
+    pneedle = (player_name or "").lower()
     for key, m in _iter_fd_markets(rows):
-        if key != market_key: 
+        if key != market_key:
             continue
-        got = _extract_fd_outcome(key, m, player_name=player_name, want_over=want_over, target_line=target)
-        if got: 
-            return got
+        for o in m.get("outcomes", []) or []:
+            res = _pull_outcome(o)
+            if not res:
+                continue
+            side, desc, ln, american = res
+            if side != "over":
+                continue
+            if pneedle not in desc.lower():
+                continue
+            # accept missing point; fall back to target; allow tiny drift (e.g., TB 2.5 alts)
+            line = ln if ln is not None else target
+            if line is None:
+                continue
+            if abs(float(line) - float(target)) > 1.0:
+                continue
+            return float(line), float(american)
+
     return None
 
-def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float,float]]:
+# -------------------- Public: NFL quote (broader props) --------------------
+def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
     """
-    NFL broader props (use market's current point):
+    NFL (uses market's current point):
       REC      -> player_receptions
       RUSH_YDS -> player_rushing_yards
       REC_YDS  -> player_receiving_yards
@@ -157,79 +212,73 @@ def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float,float]
         return None
 
     rows = _request_nfl_props(market_key)
+    pneedle = (player_name or "").lower()
+
     for key, m in _iter_fd_markets(rows):
-        if key != market_key: 
+        if key != market_key:
             continue
-        # target_line=None -> accept the market's own point
-        got = _extract_fd_outcome(key, m, player_name=player_name, want_over=True, target_line=None)
-        if got:
-            return got
+        for o in m.get("outcomes", []) or []:
+            res = _pull_outcome(o)
+            if not res:
+                continue
+            side, desc, ln, american = res
+            if side != "over":
+                continue
+            if pneedle not in desc.lower():
+                continue
+            # For NFL we WANT the live market line, so require ln to exist.
+            if ln is None:
+                continue
+            return float(ln), float(american)
+
     return None
-# ---------- Public: candidate list for "Top Picks" (MLB) ----------
+
+# -------------------- Public: MLB candidates for Top Picks --------------------
 def list_fd_mlb_candidates() -> List[Dict[str, Any]]:
     """
-    Return all FanDuel MLB Over outcomes for hits(0.5)/total bases(1.5)
-    within the |american| <= ODDS_MAX_ABS filter:
+    Return FanDuel MLB Over outcomes for hits(0.5) / total bases(1.5) within ±ODDS_MAX_ABS:
       [{player_name, prop, line, american}]
-    Notes:
-      - Accept outcomes even if outcome['point'] is missing; fall back to the target.
-      - Still require "Over".
+    Honors event-wise mode if enabled.
     """
-    rows = _request_mlb_props()
     out: List[Dict[str, Any]] = []
+    target_by_key = {"player_hits": 0.5, "player_total_bases": 1.5}
+    prop_by_key   = {"player_hits": "HITS_0_5", "player_total_bases": "TB_1_5"}
+
+    # source rows
+    rows: List[Dict[str, Any]] = []
+    if USE_EVENTWISE:
+        evs = _request_events_mlb() or []
+        for ev in evs[:max(1, EVENTS_MAX)]:
+            ev_id = ev.get("id")
+            if not ev_id:
+                continue
+            rows.append(_request_event_odds_mlb(ev_id, "player_hits,player_total_bases"))
+    else:
+        rows = _request_mlb_props_bulk()
+
     for key, m in _iter_fd_markets(rows):
-        if key not in ("player_hits", "player_total_bases"):
+        if key not in target_by_key:
             continue
-        target = 0.5 if key == "player_hits" else 1.5
-        prop   = "HITS_0_5" if key == "player_hits" else "TB_1_5"
-
-        for o in m.get("outcomes", []):
-            name = str(o.get("name", ""))  # often "Over" / "Under"
-            desc = str(o.get("description") or o.get("participant") or o.get("player") or "")
-            point = o.get("point", o.get("line"))
-            price = o.get("price", o.get("odds_american", o.get("american")))
-
-            # Over only
-            is_over = ("over" in name.lower()) or (o.get("side", "").lower() == "over")
-            if not is_over:
+        target = target_by_key[key]
+        prop   = prop_by_key[key]
+        for o in m.get("outcomes", []) or []:
+            res = _pull_outcome(o)
+            if not res:
                 continue
-
-            # Price (american) with ±ODDS_MAX_ABS filter
-            american = None
-            try:
-                american = float(price)
-            except Exception:
-                if isinstance(price, dict):
-                    for k in ("american", "price", "odds_american"):
-                        if k in price:
-                            try:
-                                american = float(price[k]); break
-                            except: pass
-            if american is None or not _price_ok(american):
+            side, desc, ln, american = res
+            if side != "over":
                 continue
-
-            # Line: accept missing 'point' (many payloads omit it) and fall back to target
-            try:
-                if point is None:
-                    line = float(target)
-                else:
-                    line = float(point)
-                    # If a point exists but differs wildly from target, skip
-                    if abs(line - float(target)) > 1.0:  # allow tiny drift; TB can sometimes show 1.5/2.5
-                        continue
-            except Exception:
-                line = float(target)
-
-            # Player display name
-            player_name = (desc or name).replace("Over", "").strip()
-            if not player_name:
+            line = ln if ln is not None else target
+            # skip wild alt lines; allow small drift
+            if abs(float(line) - float(target)) > 1.0:
                 continue
-
             out.append({
-                "player_name": player_name,
+                "player_name": desc,
                 "prop": prop,
                 "line": float(line),
                 "american": float(american),
             })
+
     return out
+
 
