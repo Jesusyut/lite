@@ -1,41 +1,35 @@
 # services/mlb.py
 from __future__ import annotations
 import os, datetime as dt
-from typing import Dict, Any, List, Optional
-
+from typing import Dict, Any, List, Optional, Tuple
 import requests
 from utils.rcache import cached_fetch
 
-# ---------------- Config / TTLs ----------------
+# -------- Config / TTLs --------
 MLB_TIMEOUT_S = float(os.getenv("MLB_TIMEOUT_S", "8"))
 MLB_RETRIES   = int(os.getenv("MLB_RETRIES", "0"))
 
-TTL_SCHEDULE  = 900          # 15m   (games for a date)
-TTL_SEARCH    = 4 * 3600     # 4h    (player search)
-TTL_GAMELOG   = 1800         # 30m   (per-game stats pulled via /games/players)
+TTL_SCHEDULE  = 900          # /games?date=...
+TTL_SEARCH    = 4 * 3600     # /players?search=...
+TTL_GAMELOG   = 1800         # /games/players per game
 CACHE_NS      = "apisports_mlb"
 
-# ------------- API-SPORTS base + headers -------------
-def _apisports_cfg() -> tuple[str, Dict[str, str]]:
-    """
-    Resolve API-SPORTS Baseball endpoint + headers.
-    Supports either:
-      - Direct: APISPORTS_MLB_KEY (or APISPORTS_KEY) with APISPORTS_MLB_BASE/APISPORTS_BASE
-      - RapidAPI: APISPORTS_MLB_RAPIDAPI_KEY (or APISPORTS_RAPIDAPI_KEY) with host
-    """
-    # Prefer central helper if present
+# Optional scoping (helps API-Sports return data)
+APISPORTS_MLB_SEASON = os.getenv("APISPORTS_MLB_SEASON", str(dt.date.today().year))
+APISPORTS_MLB_LEAGUE_ID = os.getenv("APISPORTS_MLB_LEAGUE_ID")  # e.g. MLB league id if required by your plan/provider
+
+# -------- API-SPORTS base + headers --------
+def _apisports_cfg() -> Tuple[str, Dict[str,str]]:
     try:
-        from utils.apisports_env import sport_cfg
+        from utils.apisports_env import sport_cfg  # optional helper
         base, headers = sport_cfg("MLB")
         return base.rstrip("/"), headers
     except Exception:
         pass
 
-    base = (
-        os.getenv("APISPORTS_MLB_BASE")
-        or os.getenv("APISPORTS_BASE")
-        or "https://v1.baseball.api-sports.io"
-    ).rstrip("/")
+    base = (os.getenv("APISPORTS_MLB_BASE")
+            or os.getenv("APISPORTS_BASE")
+            or "https://v1.baseball.api-sports.io").rstrip("/")
 
     rapid_key  = os.getenv("APISPORTS_MLB_RAPIDAPI_KEY") or os.getenv("APISPORTS_RAPIDAPI_KEY")
     rapid_host = os.getenv("APISPORTS_MLB_RAPIDAPI_HOST") or os.getenv("APISPORTS_RAPIDAPI_HOST")
@@ -45,20 +39,17 @@ def _apisports_cfg() -> tuple[str, Dict[str, str]]:
         if not rapid_host:
             rapid_host = "api-baseball.p.rapidapi.com"
         headers = {"x-rapidapi-key": rapid_key, "x-rapidapi-host": rapid_host}
-        # Allow using host as base
         if "://" not in base:
             base = f"https://{rapid_host}"
         return base.rstrip("/"), headers
 
     if not direct_key:
-        raise RuntimeError("API-SPORTS (MLB): missing key. Set APISPORTS_MLB_KEY or APISPORTS_KEY (or RapidAPI vars).")
-
-    headers = {"x-apisports-key": direct_key}
-    return base.rstrip("/"), headers
+        raise RuntimeError("API-SPORTS MLB: missing key (set APISPORTS_MLB_KEY or APISPORTS_KEY, or RapidAPI vars).")
+    return base.rstrip("/"), {"x-apisports-key": direct_key}
 
 BASE, HEADERS = _apisports_cfg()
 
-# ------------- HTTP helpers -------------
+# -------- HTTP helpers --------
 def _http_json(url: str, params: Dict[str, Any] | None) -> Any:
     r = requests.get(url, headers=HEADERS, params=params or {}, timeout=MLB_TIMEOUT_S)
     r.raise_for_status()
@@ -75,10 +66,6 @@ def _retrying_call(fn, tries: int):
     raise last
 
 def _get(path: str, params: Dict[str, Any] | None, ttl: int):
-    """
-    Cached GET with a safety: if the Redis layer throws a "budget exhausted"
-    and there's no cache yet, we make one direct call so routes don't 500.
-    """
     url = f"{BASE}{path}"
     def call():
         return _retrying_call(lambda: _http_json(url, params), MLB_RETRIES + 1)
@@ -90,28 +77,20 @@ def _get(path: str, params: Dict[str, Any] | None, ttl: int):
             return call()
         raise
 
-# ------------- Small in-proc cache for name→id -------------
-_NAME_TO_ID: dict[str, int] = {
-    "shohei ohtani": 660271,  # keep a couple of hot names to cut early calls
-    "aaron judge":   592450,
-    "juan soto":     665742,
-    "mookie betts":  605141,
-}
-
-# =============================================================================
-# Public API (unchanged signatures)
-# =============================================================================
-
+# -------- Public API (same signatures) --------
 def todays_matchups(date_iso: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    API-SPORTS: /games?date=YYYY-MM-DD
+    API-SPORTS: /games?date=YYYY-MM-DD (+ optional season/league if needed)
     Returns: [{gamePk, away, home}]
     """
     date_iso = date_iso or dt.date.today().isoformat()
-    js = _get("/games", {"date": date_iso}, ttl=TTL_SCHEDULE)
+    params = {"date": date_iso}
+    if APISPORTS_MLB_SEASON: params["season"] = APISPORTS_MLB_SEASON
+    if APISPORTS_MLB_LEAGUE_ID: params["league"] = APISPORTS_MLB_LEAGUE_ID
+
+    js = _get("/games", params, ttl=TTL_SCHEDULE)
     out: List[Dict[str, Any]] = []
     for g in (js.get("response") or []):
-        # flexible read
         gid  = g.get("id") or (g.get("game") or {}).get("id")
         teams = g.get("teams") or {}
         away = (teams.get("away") or {}).get("name") or (g.get("away") or {}).get("name")
@@ -122,24 +101,26 @@ def todays_matchups(date_iso: Optional[str] = None) -> List[Dict[str, Any]]:
 
 def search_player(q: str) -> List[Dict[str, Any]]:
     """
-    API-SPORTS: /players?search=q
+    API-SPORTS: /players?search=q (& season, league)
     Returns: [{id, name}]
     """
     q = (q or "").strip()
     if not q:
         return []
-    js = _get("/players", {"search": q}, ttl=TTL_SEARCH)
+    params = {"search": q}
+    if APISPORTS_MLB_SEASON: params["season"] = APISPORTS_MLB_SEASON
+    if APISPORTS_MLB_LEAGUE_ID: params["league"] = APISPORTS_MLB_LEAGUE_ID
+
+    js = _get("/players", params, ttl=TTL_SEARCH)
     out: List[Dict[str, Any]] = []
     for p in (js.get("response") or []):
         pid = p.get("id") or (p.get("player") or {}).get("id")
-        name = (
-            p.get("name")
-            or (p.get("player") or {}).get("name")
-            or " ".join([str(p.get("firstname") or ""), str(p.get("lastname") or "")]).strip()
-        )
+        name = (p.get("name")
+                or (p.get("player") or {}).get("name")
+                or " ".join([str(p.get("firstname") or ""), str(p.get("lastname") or "")]).strip())
         if pid and name:
             out.append({"id": int(pid), "name": str(name)})
-    # de-dupe
+    # de-dupe and cap
     seen, uniq = set(), []
     for r in out:
         if r["id"] in seen: continue
@@ -147,29 +128,24 @@ def search_player(q: str) -> List[Dict[str, Any]]:
     return uniq[:20]
 
 def resolve_player_id(name: str) -> Optional[int]:
-    if not name:
-        return None
-    key = name.lower().strip()
-    if key in _NAME_TO_ID:
-        return _NAME_TO_ID[key]
-    try:
-        rows = search_player(name)
-        if rows:
-            pid = int(rows[0]["id"])
-            _NAME_TO_ID[key] = pid
-            return pid
-    except Exception:
-        pass
+    rows = search_player(name or "")
+    if rows:
+        return int(rows[0]["id"])
     return None
 
-# --------- Helpers for last-10 trends via API-SPORTS ---------
-def _player_team_id(pid: int) -> Optional[int]:
-    js = _get("/players", {"id": pid}, ttl=12*3600)
+# -------- Trends helpers (API-SPORTS only) --------
+def _player_info(pid: int) -> Dict[str, Any]:
+    params = {"id": pid}
+    if APISPORTS_MLB_SEASON: params["season"] = APISPORTS_MLB_SEASON
+    if APISPORTS_MLB_LEAGUE_ID: params["league"] = APISPORTS_MLB_LEAGUE_ID
+    return _get("/players", params, ttl=12*3600)
+
+def _player_team_id_by_pid(pid: int) -> Optional[int]:
+    js = _player_info(pid)
     resp = js.get("response") or []
     if not resp:
         return None
     rec = resp[0]
-    # common shapes: rec["team"] or rec["statistics"][0]["team"]
     team = rec.get("team")
     if isinstance(team, dict) and team.get("id"):
         return int(team["id"])
@@ -178,42 +154,46 @@ def _player_team_id(pid: int) -> Optional[int]:
         t = stats[0].get("team")
         if isinstance(t, dict) and t.get("id"):
             return int(t["id"])
-    # try fallback keys
-    for k in ("Team", "teams"):
+    # try common alternates
+    for k in ("Team","teams"):
         t = rec.get(k)
         if isinstance(t, dict) and t.get("id"):
             return int(t["id"])
     return None
 
 def _team_recent_game_ids(team_id: int, season: int, cap: int = 24) -> List[int]:
-    js = _get("/games", {"team": team_id, "season": season}, ttl=3600)
+    params = {"team": team_id, "season": season}
+    if APISPORTS_MLB_LEAGUE_ID: params["league"] = APISPORTS_MLB_LEAGUE_ID
+    js = _get("/games", params, ttl=3600)
     resp = js.get("response") or []
-    # sort newest→oldest by date/commence_time
-    def _dt(g: Dict[str, Any]) -> str:
+    def _key(g: Dict[str, Any]) -> str:
         return g.get("date") or g.get("time") or g.get("commence_time") or ""
-    resp.sort(key=_dt, reverse=True)
-    gids: List[int] = []
+    resp.sort(key=_key, reverse=True)
+    out: List[int] = []
     for g in resp:
         gid = g.get("id") or (g.get("game") or {}).get("id")
-        if gid: gids.append(int(gid))
-        if len(gids) >= cap: break
-    return gids
+        if gid:
+            out.append(int(gid))
+        if len(out) >= cap:
+            break
+    return out
 
 def _game_players(gid: int) -> Dict[str, Any]:
-    return _get("/games/players", {"game": gid}, ttl=24*3600)
+    params = {"game": gid}
+    if APISPORTS_MLB_LEAGUE_ID: params["league"] = APISPORTS_MLB_LEAGUE_ID
+    return _get("/games/players", params, ttl=24*3600)
 
 def _extract_batting_line(game_players: Dict[str, Any], pid: int) -> Optional[Dict[str, Any]]:
     resp = game_players.get("response") or []
     if not resp: return None
-    node = resp[0]  # single game
+    node = resp[0]
     players = node.get("players") or {}
-    for side in ("home", "away"):
-        arr = players.get(side) or []
-        for p in arr:
+    for side in ("home","away"):
+        for p in players.get(side) or []:
             pl = p.get("player") or {}
             _pid = pl.get("id") or p.get("id")
             if _pid and int(_pid) == int(pid):
-                st = p.get("statistics") or p.get("stats") or {}
+                st  = p.get("statistics") or p.get("stats") or {}
                 bat = st.get("batting") or st.get("Batting") or {}
                 if bat: return bat
                 if isinstance(st, list) and st:
@@ -221,58 +201,92 @@ def _extract_batting_line(game_players: Dict[str, Any], pid: int) -> Optional[Di
                     if bat: return bat
     return None
 
-def batter_trends_last10(player_id: int, season: Optional[str] = None) -> Dict[str, Any]:
-    """
-    API-SPORTS ONLY:
-      - find player team
-      - get recent team games
-      - per game: /games/players?game=... → batting line
-      - build last-10 series for Hits>=1 and TB>=2
-    """
-    try:
-        season_i = int(season) if season not in (None, "",) else dt.date.today().year
-    except Exception:
-        season_i = dt.date.today().year
+def _num(d: Dict[str, Any], *keys) -> float:
+    for k in keys:
+        if k in d and d[k] is not None:
+            try: return float(d[k])
+            except: pass
+    return 0.0
 
-    team_id = _player_team_id(int(player_id))
+def batter_trends_last10(player_id: int, season: Optional[str] = None, player_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Build last-10 indicators:
+      - hits >= 1  (HITS_0_5)
+      - total bases >= 2 (TB_1_5)
+    Accepts API-SPORTS player id. If that id fails, will try to resolve via player_name.
+    """
+    # Resolve to API-SPORTS id if this looks like an MLBAM id or is wrong
+    api_pid: Optional[int] = None
+
+    # First, assume caller passed API-SPORTS id
+    try:
+        api_pid = int(player_id)
+    except Exception:
+        api_pid = None
+
+    # If we have a name and either no id or player lookup fails, resolve by name
+    def _ensure_api_pid(pid: Optional[int]) -> Optional[int]:
+        if pid:
+            # quick probe to see if /players?id=pid returns something
+            try:
+                js = _player_info(pid)
+                if (js.get("response") or []):
+                    return pid
+            except Exception:
+                pass
+        # try name resolution
+        if player_name:
+            rid = resolve_player_id(player_name)
+            if rid:
+                return rid
+        return pid
+
+    api_pid = _ensure_api_pid(api_pid)
+
+    # If still no valid id, we’re done
+    if not api_pid:
+        return {"n": 0, "hits_rate": 0.0, "tb2_rate": 0.0, "hits_series": [], "tb2_series": []}
+
+    # Season int
+    try:
+        season_i = int(season) if season not in (None,"") else int(APISPORTS_MLB_SEASON)
+    except Exception:
+        season_i = int(dt.date.today().year)
+
+    team_id = _player_team_id_by_pid(api_pid)
     if not team_id:
         return {"n": 0, "hits_rate": 0.0, "tb2_rate": 0.0, "hits_series": [], "tb2_series": []}
 
-    game_ids = _team_recent_game_ids(team_id, season_i, cap=24)
+    gids = _team_recent_game_ids(team_id, season_i, cap=24)
 
     hits_series: List[int] = []
     tb2_series:  List[int] = []
 
-    def _num(d: Dict[str, Any], *keys) -> float:
-        for k in keys:
-            if k in d and d[k] is not None:
-                try:   return float(d[k])
-                except: pass
-        return 0.0
-
-    for gid in game_ids:
+    for gid in gids:
         if len(hits_series) >= 10:
             break
         try:
             gp = _game_players(gid)
-            bat = _extract_batting_line(gp, int(player_id))
+            bat = _extract_batting_line(gp, api_pid)
             if not bat:
                 continue
             h  = _num(bat, "hits", "H", "h")
             tb = _num(bat, "totalBases", "total_bases", "TB", "tb", "bases_total", "bases")
-            hits_series.append(1 if h  >= 1 else 0)
+            hits_series.append(1 if h >= 1 else 0)
             tb2_series.append(1 if tb >= 2 else 0)
         except Exception:
             continue
 
-    n = max(len(hits_series), 1)
-    hr = round(100.0 * (sum(hits_series) / n), 1)
-    tr = round(100.0 * (sum(tb2_series)  / n), 1)
+    n = len(hits_series)
+    if n == 0:
+        return {"n": 0, "hits_rate": 0.0, "tb2_rate": 0.0, "hits_series": [], "tb2_series": []}
+
     return {
-        "n": len(hits_series),
-        "hits_rate": hr,
-        "tb2_rate": tr,
+        "n": n,
+        "hits_rate": round(100.0 * sum(hits_series)/n, 1),
+        "tb2_rate":  round(100.0 * sum(tb2_series)/n,  1),
         "hits_series": hits_series,
-        "tb2_series": tb2_series,
+        "tb2_series":  tb2_series,
     }
+
 
