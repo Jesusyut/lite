@@ -1,3 +1,4 @@
+# services/odds_fanduel.py
 from __future__ import annotations
 import os, requests
 from typing import Optional, Tuple, Dict, Any, List
@@ -27,11 +28,10 @@ def _req(url: str, params: Dict[str, Any], *, ttl=600):
         r = requests.get(url, params=p, timeout=ODDS_TIMEOUT_S)
         r.raise_for_status()
         js = r.json()
+        # Provider error bodies look like {"message": "..."}
         if isinstance(js, dict) and js.get("message"):
-            # The Odds API returns {"message": "..."} on errors
             raise RuntimeError(js["message"])
         return js
-    # cache key includes URL + params
     return cached_fetch("oddsfd", url, p, call, ttl=ttl, stale_ttl=3*86400)
 
 # ---------- Event lists ----------
@@ -48,7 +48,7 @@ def _nfl_events() -> List[Dict[str, Any]]:
 
 # ---------- Event odds ----------
 def _event_odds(sport_path: str, event_id: str, markets_csv: str) -> Dict[str, Any]:
-    # Player markets must come from the /events/{id}/odds endpoint. :contentReference[oaicite:2]{index=2}
+    # Player markets must come from /events/{id}/odds
     url = f"{SPORTS_BASE}/{sport_path}/events/{event_id}/odds"
     return _req(url, {
         "regions": ODDS_REGION,
@@ -85,7 +85,7 @@ def _parse_american(price) -> Optional[float]:
     return None
 
 def _iter_fd_markets(rows: List[Dict[str, Any]]):
-    """Yield (market_key, market_dict) for FanDuel only across all event-odds payloads."""
+    """Yield (market_key, market_dict) for FanDuel only across event-odds payloads."""
     for ev in rows or []:
         for bm in (ev.get("bookmakers") or []):
             bk = (bm.get("key") or bm.get("title") or "").lower()
@@ -94,12 +94,12 @@ def _iter_fd_markets(rows: List[Dict[str, Any]]):
             for m in (bm.get("markets") or []):
                 yield m.get("key"), m
 
-def _pull_outcome(o: Dict[str, Any]) -> Optional[Tuple[str, str, Optional[float], float]]:
+def _pull_outcome(o: Dict[str, Any]):
     """
     Return (side, player_name, line, american) for an outcome.
     side is 'over' or 'under'.
     """
-    name = str(o.get("name", "")).strip().lower()  # usually 'over' / 'under'
+    name = str(o.get("name", "")).strip().lower()  # 'over'/'under'
     desc = str(o.get("description") or o.get("participant") or o.get("player") or "").strip()
     if not name or not desc:
         return None
@@ -122,7 +122,6 @@ def get_fd_mlb_price(player_name: str, prop: str) -> Optional[Tuple[float, float
     MLB fixed props (market keys per docs):
       HITS_0_5  -> batter_hits @ 0.5 (Over)
       TB_1_5    -> batter_total_bases @ 1.5 (Over)
-    Market keys reference: batter_hits, batter_total_bases. :contentReference[oaicite:3]{index=3}
     """
     mk_map = {
         "HITS_0_5": ("batter_hits", 0.5),
@@ -206,7 +205,7 @@ def list_fd_mlb_candidates() -> List[Dict[str, Any]]:
 # ---------- Public: NFL ----------
 def get_fd_nfl_quote(player_name: str, prop: str) -> Optional[Tuple[float, float]]:
     """
-    NFL broader props (use market's live point). Market keys per docs: :contentReference[oaicite:4]{index=4}
+    NFL broader props (use market's live point). Market keys per docs:
       REC       -> player_receptions
       RUSH_YDS  -> player_rush_yds
       REC_YDS   -> player_reception_yds
