@@ -61,7 +61,6 @@ function setPropOptions(league){
     : "Enter NFL player (exact name or search if available)";
 }
 
-
 tabsEl.addEventListener("click", (e)=>{
   const btn = e.target.closest(".tab");
   if(!btn || btn.disabled) return;
@@ -132,6 +131,7 @@ evalBtn.addEventListener("click", async ()=>{
       return;
     }
     payload.player_id = selectedMlb.id;
+    payload.player_name = selectedMlb.name; // needed for FanDuel odds lookup
     title = `${selectedMlb.name} — ${prop.includes("HITS") ? "Over 0.5 Hits" : "Over 1.5 Total Bases"}`;
   } else {
     const name = playerEl.value.trim();
@@ -141,7 +141,8 @@ evalBtn.addEventListener("click", async ()=>{
       addResultCard({title:"Error", subtitle:"Enter NFL player name", pTrend:0, breakEven:null, tag:"Fade"});
       return;
     }
-    title += ` — ${prop === "REC_3_5" ? "Over 3.5 Receptions" : "Over 49.5 Rush Yards"}`;
+    const pretty = { REC:"Receptions", RUSH_YDS:"Rushing Yards", REC_YDS:"Receiving Yards", PASS_YDS:"Passing Yards" };
+    title += ` — ${pretty[prop] || prop}`;
   }
 
   setLoading(true);
@@ -154,9 +155,12 @@ evalBtn.addEventListener("click", async ()=>{
     if(res.error){
       addResultCard({title:"Error", subtitle:String(res.error), pTrend:0, breakEven:null, tag:"Fade"});
     }else{
-      const subtitle = (res.break_even_prob!=null)
-        ? `Trend ${(res.p_trend*100).toFixed(1)}% • Break-even ${(res.break_even_prob*100).toFixed(1)}%`
-        : `Trend ${(res.p_trend*100).toFixed(1)}%`;
+      const parts = [];
+      if (res.used_line != null) parts.push(`Line ${Number(res.used_line).toFixed(1)}`);
+      parts.push(`Trend ${(res.p_trend*100).toFixed(1)}%`);
+      if (res.break_even_prob != null) parts.push(`Break-even ${(res.break_even_prob*100).toFixed(1)}%`);
+      const subtitle = parts.join(" • ");
+
       addResultCard({
         title,
         subtitle,
