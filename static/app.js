@@ -1,12 +1,13 @@
 let currentLeague = "mlb";
 let selectedMlb = null; // {id, name}
-let selectedNfl = null; // {id, name} when API search works; else name-only CSV mode
+let selectedNfl = null; // {id, name}
 
 const tabsEl = document.getElementById("tabs");
 const playerEl = document.getElementById("player");
 const propEl = document.getElementById("prop");
 const americanEl = document.getElementById("american");
 const evalBtn = document.getElementById("evalBtn");
+const topBtn = document.getElementById("topBtn");
 const resultsEl = document.getElementById("results");
 const countEl = document.getElementById("count");
 const loadingEl = document.getElementById("loading");
@@ -35,6 +36,81 @@ function addResultCard({title, subtitle, pTrend, breakEven, tag}) {
         <div class="muted small">${beTxt}</div>
       </div>
     </div>`;
+  resultsEl.appendChild(card);
+  setCount(resultsEl.children.length);
+}
+
+function sparkSVG(arr){
+  const w = 120, h = 26;
+  const n = Array.isArray(arr) ? arr.length : 0;
+  if(n === 0) return '';
+  const step = w / n;
+  let rects = '';
+  for(let i=0;i<n;i++){
+    const v = arr[i] ? 1 : 0;
+    const barH = v ? 18 : 6;
+    const y = h - barH - 3;
+    const x = i * step + 2;
+    const barW = Math.max(2, step - 4);
+    rects += `<rect x="${x.toFixed(1)}" y="${y}" width="${barW.toFixed(1)}" height="${barH}" rx="2" ry="2" fill="${v ? '#2dd36f' : '#2b3245'}"></rect>`;
+  }
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="last 10 sparkline">${rects}</svg>`;
+}
+
+function addTopCard(pick){
+  const propLabel = pick.prop === "HITS_0_5" ? "Over 0.5 Hits" : "Over 1.5 Total Bases";
+  const title = `${pick.player_name} — ${propLabel}`;
+  const subtitleParts = [
+    `Line ${Number(pick.line).toFixed(1)}`,
+    `Trend ${(pick.p_trend*100).toFixed(1)}%`,
+    `Break-even ${(pick.break_even_prob*100).toFixed(1)}%`
+  ];
+  const subtitle = subtitleParts.join(" • ");
+  const svg = sparkSVG(pick.spark || []);
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="row">
+      <div>
+        <div style="font-weight:700">${title}
+          <span class="edge-badge">${pick.tag}</span>
+        </div>
+        <div class="muted small">${subtitle}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:22px;font-weight:700">${(pick.p_trend*100).toFixed(1)}%</div>
+        <div class="muted small">FD ${pick.american > 0 ? '+'+pick.american : pick.american}</div>
+      </div>
+    </div>
+    <div class="muted small" style="margin-top:8px;display:flex;align-items:center;gap:8px">
+      <span>Last 10</span>${svg}
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="tab" data-act="use">Use in evaluator</button>
+    </div>
+  `;
+
+  // Wire "Use in evaluator"
+  const btn = card.querySelector('button[data-act="use"]');
+  btn.addEventListener("click", ()=>{
+    // force MLB tab
+    for(const b of tabsEl.querySelectorAll(".tab")) {
+      if (b.dataset.league === "mlb") b.classList.add("active"); else b.classList.remove("active");
+    }
+    currentLeague = "mlb";
+    setPropOptions(currentLeague);
+
+    selectedMlb = { id: pick.player_id, name: pick.player_name };
+    playerEl.value = pick.player_name;
+    propEl.value = pick.prop;
+    americanEl.value = pick.american ?? "";
+
+    // Optionally auto-run evaluate:
+    // evalBtn.click();
+    window.scrollTo({top:0,behavior:"smooth"});
+  });
+
   resultsEl.appendChild(card);
   setCount(resultsEl.children.length);
 }
@@ -77,7 +153,7 @@ let searchTimer = null;
 playerEl.addEventListener("input", ()=>{
   const q = playerEl.value.trim();
   if(currentLeague !== "mlb"){
-    selectedNfl = null; // NFL will use name or search endpoint on change
+    selectedNfl = null;
     return;
   }
   if(q.length < 3){ selectedMlb = null; return; }
@@ -86,14 +162,14 @@ playerEl.addEventListener("input", ()=>{
     try{
       const res = await fetch(`/api/mlb/search?q=${encodeURIComponent(q)}`).then(r=>r.json());
       if(res && res.length){
-        selectedMlb = res[0];           // pick first match
-        playerEl.value = res[0].name;   // show resolved full name
+        selectedMlb = res[0];
+        playerEl.value = res[0].name;
       }
     }catch(_){}
   }, 250);
 });
 
-// Optional NFL search (fires on change to save quota). If none, we stay CSV mode.
+// Optional NFL search (on change)
 async function tryNflSearchByName(q){
   try{
     const res = await fetch(`/api/nfl/player/search?q=${encodeURIComponent(q)}`).then(r=>r.json());
@@ -101,7 +177,7 @@ async function tryNflSearchByName(q){
       selectedNfl = res[0];
       playerEl.value = res[0].name;
     } else {
-      selectedNfl = null; // CSV mode
+      selectedNfl = null;
     }
   }catch(_){
     selectedNfl = null;
@@ -131,7 +207,7 @@ evalBtn.addEventListener("click", async ()=>{
       return;
     }
     payload.player_id = selectedMlb.id;
-    payload.player_name = selectedMlb.name; // needed for FanDuel odds lookup
+    payload.player_name = selectedMlb.name; // for FD odds lookup
     title = `${selectedMlb.name} — ${prop.includes("HITS") ? "Over 0.5 Hits" : "Over 1.5 Total Bases"}`;
   } else {
     const name = playerEl.value.trim();
@@ -176,6 +252,26 @@ evalBtn.addEventListener("click", async ()=>{
   }
 });
 
+// Top Picks (MLB)
+async function loadTopPicks(){
+  clearResults();
+  setLoading(true);
+  try{
+    const list = await fetch("/api/top/mlb?limit=12").then(r=>r.json());
+    if(Array.isArray(list) && list.length){
+      for(const p of list) addTopCard(p);
+    } else {
+      addResultCard({title:"No picks", subtitle:"No FanDuel candidates within ±250 today.", pTrend:0, breakEven:null, tag:"Fade"});
+    }
+  }catch(_){
+    addResultCard({title:"Error", subtitle:"Could not load top picks", pTrend:0, breakEven:null, tag:"Fade"});
+  }finally{
+    setLoading(false);
+  }
+}
+topBtn.addEventListener("click", loadTopPicks);
+
 // init
 setPropOptions(currentLeague);
 setLoading(false);
+
