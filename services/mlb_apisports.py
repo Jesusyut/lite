@@ -7,7 +7,7 @@ import requests
 from utils.rcache import cached_fetch  # same helper you already use
 
 # ---------- Config / headers ----------
-BASE = (os.getenv("APISPORTS_BASE") or "https://v1.baseball.api-sports.io").rstrip("/")
+BASE = (os.getenv("APISPORTS_MLB_BASE") or "https://v1.baseball.api-sports.io").rstrip("/")
 KEY  = os.getenv("APISPORTS_KEY")
 RAPID_KEY  = os.getenv("APISPORTS_RAPIDAPI_KEY")
 RAPID_HOST = os.getenv("APISPORTS_RAPIDAPI_HOST")
