@@ -17,7 +17,8 @@ except Exception:
     HAVE_API = False
 
 from utils.prob import american_to_prob
-from utils.price_source import resolve_shop_price
+from utils.price_source import resolve_shop_price, resolve_shop_quote
+
 
 app = Flask(__name__, static_url_path="", static_folder="static")
 
