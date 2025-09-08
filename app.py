@@ -60,6 +60,7 @@ def nfl_player_trends(pid):
     return jsonify(last5_trends(name))
 
 # --- Evaluation (shared) ---
+
 @app.post("/api/evaluate")
 def evaluate():
     """
@@ -70,67 +71,76 @@ def evaluate():
       player_id (mlb) or player_name (nfl)
       american (optional)
     """
-    j = request.get_json() or {}
-    league   = j.get("league")
-    prop     = j.get("prop")
-    american = j.get("american", None)
+    try:
+        j = request.get_json() or {}
+        league   = j.get("league")
+        prop     = j.get("prop")
+        american = j.get("american", None)
+        used_line = None
 
-    used_line = None
+        # Auto-fill price (line, american) from FanDuel if empty
+        if american in (None, ""):
+            from utils.price_source import resolve_shop_price
+            got = resolve_shop_price(
+                league=league,
+                prop=prop,
+                player_name=j.get("player_name"),
+                player_id=j.get("player_id"),
+            )
+            if got:
+                used_line, american = got
 
-    # Auto-fill price (line, american) from FanDuel if empty
-    if american in (None, ""):
-        got = resolve_shop_price(
-            league=league,
-            prop=prop,
-            player_name=j.get("player_name"),
-            player_id=j.get("player_id"),
-        )
-        if got:
-            used_line, american = got
+        from utils.prob import american_to_prob
+        p_break_even = american_to_prob(american) if american not in (None, "") else None
 
-    p_break_even = american_to_prob(american) if american not in (None, "") else None
-
-    if league == "mlb":
-        pid = j.get("player_id")
-        if not pid:
-            nm = j.get("player_name", "")
-            pid = resolve_player_id(nm)
+        if league == "mlb":
+            from services.mlb import batter_trends_last10, resolve_player_id
+            pid = j.get("player_id")
             if not pid:
-                return jsonify({"error":"MLB player could not be resolved"}), 400
+                nm = j.get("player_name", "")
+                pid = resolve_player_id(nm)
+                if not pid:
+                    return jsonify({"error":"MLB player could not be resolved"}), 400
 
-        t = batter_trends_last10(int(pid))
-        if prop == "HITS_0_5":
-            p_trend = (t.get("hits_rate") or 0) / 100.0
-        elif prop == "TB_1_5":
-            p_trend = (t.get("tb2_rate")  or 0) / 100.0
+            t = batter_trends_last10(int(pid))
+            if prop == "HITS_0_5":
+                p_trend = (t.get("hits_rate") or 0) / 100.0
+            elif prop == "TB_1_5":
+                p_trend = (t.get("tb2_rate")  or 0) / 100.0
+            else:
+                return jsonify({"error":"bad mlb prop"}), 400
+
+        elif league == "nfl":
+            from services.nfl import last5_trends
+            name = j.get("player_name","")
+            if not name:
+                return jsonify({"error":"NFL needs player_name"}), 400
+            t = last5_trends(name)
+            if prop == "REC":
+                p_trend = (t.get("rec_over35_rate")  or 0) / 100.0
+            elif prop == "RUSH_YDS":
+                p_trend = (t.get("rush_over49_rate") or 0) / 100.0
+            elif prop in ("REC_YDS","PASS_YDS"):
+                p_trend = 0.0  # expand when you wire yards trends
+            else:
+                return jsonify({"error":"bad nfl prop"}), 400
         else:
-            return jsonify({"error":"bad mlb prop"}), 400
+            return jsonify({"error":"bad league"}), 400
 
-    elif league == "nfl":
-        name = j.get("player_name","")
-        t = last5_trends(name)
-        if prop == "REC":
-            p_trend = (t.get("rec_over35_rate")  or 0) / 100.0
-        elif prop == "RUSH_YDS":
-            p_trend = (t.get("rush_over49_rate") or 0) / 100.0
-        elif prop in ("REC_YDS","PASS_YDS"):
-            p_trend = 0.0  # placeholder until you add yards trend math
-        else:
-            return jsonify({"error":"bad nfl prop"}), 400
-    else:
-        return jsonify({"error":"bad league"}), 400
+        tag = "Fade"
+        if p_trend >= 0.58: tag = "Straight"
+        elif p_trend >= 0.52: tag = "Parlay leg"
 
-    tag = "Fade"
-    if p_trend >= 0.58: tag = "Straight"
-    elif p_trend >= 0.52: tag = "Parlay leg"
-
-    return jsonify({
-        "p_trend": round(p_trend, 4),
-        "break_even_prob": round(p_break_even, 4) if p_break_even is not None else None,
-        "used_line": used_line,
-        "tag": tag
-    })
-
+        return jsonify({
+            "p_trend": round(p_trend, 4),
+            "break_even_prob": round(p_break_even, 4) if p_break_even is not None else None,
+            "used_line": used_line,
+            "tag": tag
+        })
+    except Exception as e:
+        # So you see the actual reason instead of a blank 500 page
+        return jsonify({"error": f"evaluate failed: {type(e).__name__}: {e}"}), 500
+        
 # --- Top Picks (MLB) ---  (ONLY ONE definition — remove any duplicates!)
 @app.get("/api/top/mlb")
 def top_mlb():
