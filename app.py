@@ -10,6 +10,12 @@ except Exception:
 
 from utils.prob import american_to_prob
 from utils.price_source import resolve_shop_price, resolve_shop_quote
+from flask import Flask
+from app_scheduler import maybe_start_scheduler
+
+app = Flask(__name__)
+maybe_start_scheduler()  # starts APScheduler if RUN_SCHEDULER=true
+
 
 
 
