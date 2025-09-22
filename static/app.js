@@ -315,3 +315,11 @@ document.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => loadTopPicks(), 3500);
 });
 
+/* Hide evaluator/search UI */
+#player,
+#american,
+#evalBtn,
+label[for="player"],
+label[for="american"] {
+  display: none !important;
+}
