@@ -28,6 +28,34 @@ except Exception:
         return _MEM.get(key)
     def _cache_set(key: str, value, ttl_s: int = 86400):
         _MEM[key] = value
+# --- cache-only helpers for request path (no network calls) ---
+
+def resolve_player_id_cached(name: str) -> int | None:
+    """
+    Return a cached MLBAM player id for a name, or None (never hits network).
+    It checks a direct lookup cache and falls back to the cached search list.
+    """
+    if not name:
+        return None
+    key = f"mlb:lookup:{name.lower()}"
+    v = _cache_get(key)
+    if v is not None:
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+    # If we've cached a search result before, reuse it
+    s = _cache_get(f"mlb:search:{name.lower()}")
+    if isinstance(s, list) and s:
+        pid = s[0].get("id")
+        try:
+            pid = int(pid)
+        except Exception:
+            return None
+        _cache_set(key, pid, TTL_HR)
+        return pid
+    return None
 
 BASE = "https://statsapi.mlb.com/api/v1"
 TTL_DAY   = int(os.getenv("MLB_CACHE_TTL_S", "86400"))   # 24h
