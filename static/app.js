@@ -298,10 +298,13 @@ async function loadTopPicks(){
   }
 }
 
+
 // Wire once
 topBtn?.addEventListener('click', loadTopPicks);
 
-// Hide spinner on initial load
-document.addEventListener('DOMContentLoaded', () => setLoading(false));
-
+// Hide spinner on initial load + auto-load Top Picks (MLB)
+document.addEventListener('DOMContentLoaded', () => {
+  setLoading(false);
+  loadTopPicks();              // ← loads Top Picks by default
+});
 
