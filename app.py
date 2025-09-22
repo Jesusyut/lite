@@ -152,7 +152,6 @@ def evaluate():
         return jsonify({"error": f"evaluate failed: {type(e).__name__}: {e}"}), 500
 
 # --- Top Picks (MLB): cache-first + background warm (single definition) ---
-# --- Top Picks (MLB): cache-first + background warm ---
 from concurrent.futures import ThreadPoolExecutor
 import threading, time
 from flask import current_app
@@ -160,18 +159,40 @@ from flask import current_app
 _warm_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=3)
 
-def _warm_trends_async(pids):
-    from services.mlb import batter_trends_last10
-    uniq = list({int(x) for x in pids if x})
+def _warm_names_and_trends_async(names_to_resolve, pids_to_warm):
+    """
+    Resolve missing names to ids, then warm trends for all pids (non-blocking).
+    """
+    from services.mlb import resolve_player_id, batter_trends_last10
+    uniq_names = list({n for n in names_to_resolve if n})
+    uniq_pids  = list({int(p) for p in pids_to_warm if p})
+
+    def _resolve_and_warm(name):
+        try:
+            pid = resolve_player_id(name)  # may hit Stats API once
+            if pid:
+                batter_trends_last10(pid)  # warm trend cache
+        except Exception:
+            pass
+
+    def _warm_pid(pid):
+        try:
+            batter_trends_last10(pid)
+        except Exception:
+            pass
+
     with _warm_lock:
-        for pid in uniq:
-            _executor.submit(batter_trends_last10, pid)
+        for nm in uniq_names:
+            _executor.submit(_resolve_and_warm, nm)
+        for pid in uniq_pids:
+            _executor.submit(_warm_pid, pid)
 
 @app.get("/api/top/mlb")
 def top_mlb():
     try:
         from services.odds_fanduel import list_fd_mlb_candidates
-        from services.mlb import resolve_player_id, batter_trends_last10_cached
+        # IMPORTANT: cache-only reads here
+        from services.mlb import resolve_player_id_cached, batter_trends_last10_cached
         from utils.prob import american_to_prob
 
         limit         = min(max(int(request.args.get("limit", "12")), 1), 24)
@@ -184,27 +205,30 @@ def top_mlb():
         per_event_cap = max(5, int(request.args.get("per_event_cap", "20")))
 
         t0 = time.time()
-        # Odds fetch with graceful failure → 502 JSON instead of HTML
         try:
             cands = list_fd_mlb_candidates(max_events=events, per_event_cap=per_event_cap)
         except Exception as e:
             return jsonify({"error": f"odds fetch failed: {e}"}), 502
 
         cands = cands[:max_cands]
-        picks, warm_pids = [], []
+
+        picks, names_to_resolve, pids_to_warm = [], [], []
 
         for c in cands:
             if len(picks) >= limit or (time.time() - t0) > budget_s:
                 break
 
             name = c["player_name"]
-            pid  = resolve_player_id(name)
+            pid  = resolve_player_id_cached(name)  # never hits network
             if not pid:
+                # queue name for background resolution; skip for now
+                names_to_resolve.append(name)
                 continue
 
-            t = batter_trends_last10_cached(pid)  # instant if cached; None if not warmed
+            t = batter_trends_last10_cached(pid)  # never hits network
             if t is None:
-                warm_pids.append(pid)
+                # queue pid for background warm; skip for now
+                pids_to_warm.append(pid)
                 continue
 
             if c["prop"] == "HITS_0_5":
@@ -234,8 +258,9 @@ def top_mlb():
                 "edge": round(edge, 4), "tag": tag, "spark": spark
             })
 
-        if warm_pids:
-            _warm_trends_async(warm_pids)
+        # fire background warmers (resolve missing names, then warm trends)
+        if names_to_resolve or pids_to_warm:
+            _warm_names_and_trends_async(names_to_resolve, pids_to_warm)
 
         picks.sort(key=lambda x: x["edge"], reverse=True)
         return jsonify(picks[:limit])
@@ -243,6 +268,7 @@ def top_mlb():
     except Exception as e:
         current_app.logger.exception("top_mlb failed")
         return jsonify({"error": f"top_mlb_failed: {type(e).__name__}: {e}"}), 500
+
 
 # --- Top Picks (NFL): stub so the NFL tab doesn't 404 ---
 @app.get("/api/top/nfl")
