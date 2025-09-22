@@ -1,3 +1,5 @@
+// app.js — cleaned up (single declarations, single loadTopPicks, NFL/MLB working)
+
 let currentLeague = "mlb";
 let selectedMlb = null; // {id, name}
 let selectedNfl = null; // {id, name}
@@ -148,6 +150,7 @@ function setPropOptions(league){
     : "Enter NFL player (exact name or search if available)";
 }
 
+// Tab click handler (single binding)
 tabsEl.addEventListener("click", (e)=>{
   const btn = e.target.closest(".tab");
   if(!btn || btn.disabled) return;
@@ -260,17 +263,12 @@ evalBtn.addEventListener("click", async ()=>{
   }
 });
 
-// Top Picks (MLB) — use stricter defaults to surface real edges
-// helpers
-const num = (v, d) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-};
-const leaguePath = l =>
-  ({ mlb:'mlb', nfl:'nfl', nba:'nba', nhl:'nhl', ufc:'ufc' }[(l||'mlb').toLowerCase()] || 'mlb');
+// ---------- Top Picks ----------
+
+const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+const leaguePath = l => ({ mlb:'mlb', nfl:'nfl', nba:'nba', nhl:'nhl', ufc:'ufc' }[(l||'mlb').toLowerCase()] || 'mlb');
 
 function getFilters(){
-  // if you don't have inputs, these defaults are used
   const limit     = num(document.querySelector('#limit')?.value, 12);
   const min_edge  = num(document.querySelector('#min-edge')?.value, 0.03);
   const min_trend = num(document.querySelector('#min-trend')?.value, 0.57);
@@ -278,7 +276,7 @@ function getFilters(){
   return { limit, min_edge, min_trend, events };
 }
 
-// Top Picks — uses the active league
+// uses the active league (single definition)
 async function loadTopPicks(){
   clearResults();
   setLoading(true);
@@ -286,50 +284,24 @@ async function loadTopPicks(){
     const qs   = new URLSearchParams(getFilters()).toString();
     const path = `/api/top/${leaguePath(currentLeague)}?${qs}`;
     const res  = await fetchJSON(path);
-    const list = Array.isArray(res) ? res : (res?.data ?? []); // tolerate either shape
-
-    if (list.length){
-      for (const p of list) addTopCard(p);
-    } else {
-      addResultCard({
-        title: "No picks",
-        subtitle: `No positive-edge ${String(currentLeague).toUpperCase()} props under current filters.`,
-        pTrend: 0, breakEven: null, tag: "Fade"
-      });
-    }
-  } catch(err){
-    addResultCard({ title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade" });
-  } finally {
-    setLoading(false);
-  }
-}
-// ensure this is the ONLY place you call setLoading(true/false)
-async function loadTopPicks(){
-  clearResults();
-  setLoading(true);
-  try {
-    const qs   = new URLSearchParams(getFilters()).toString();
-    const path = `/api/top/${leaguePath(currentLeague)}?${qs}`;
-    const res  = await fetchJSON(path);
     const list = Array.isArray(res) ? res : (res?.data ?? []);
     if (list.length) list.forEach(addTopCard);
-    else addResultCard({title:"No picks", subtitle:`No positive-edge ${String(currentLeague).toUpperCase()} props under current filters.`, pTrend:0, breakEven:null, tag:"Fade"});
-  } catch (err) {
-    addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
-  } finally {
+    else addResultCard({
+      title:"No picks",
+      subtitle:`No positive-edge ${String(currentLeague).toUpperCase()} props under current filters.`,
+      pTrend:0, breakEven:null, tag:"Fade"
+    });
+  }catch(err){
+    addResultCard({ title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade" });
+  }finally{
     setLoading(false);
   }
 }
 
-// fire on tab change AND on Top Picks button click
-let currentLeague = 'mlb';
-document.querySelectorAll('[data-league]').forEach(btn=>{
-  btn.addEventListener('click', ()=>{
-    currentLeague = btn.dataset.league;
-    setPropOptions(currentLeague);
-    // optional: auto refresh on tab switch
-    // loadTopPicks();
-  });
-});
+// Wire once
 topBtn?.addEventListener('click', loadTopPicks);
+
+// Hide spinner on initial load
+document.addEventListener('DOMContentLoaded', () => setLoading(false));
+
 
