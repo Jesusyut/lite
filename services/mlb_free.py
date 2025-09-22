@@ -33,6 +33,11 @@ def _throttled_get(path, params=None, tries=4):
         return resp.json()
     # last try:
     resp.raise_for_status()
+# return trends ONLY if already cached; else None (instant)
+def batter_trends_last10_cached(pid: int):
+    season = datetime.date.today().year
+    key = f"mlb:last10:{season}:{pid}"
+    return _cache_get(key)
 
 def _this_season():
     # simple: use current year; adjust if needed post-season
