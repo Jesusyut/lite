@@ -11,8 +11,8 @@ def get_price(league: str, prop: str, player_name: str | None = None, player_id:
             except Exception:
                 return None
             market_map = {
-                "HITS_0_5": "player_hits_over_under",
-                "TB_1_5":   "player_total_bases_over_under",
+                "HITS_0_5": "batter_hits",
+                "TB_1_5":   "batter_total_bases",
             }
             market = market_map.get(prop)
             if not market or not player_name:
@@ -31,8 +31,9 @@ def get_price(league: str, prop: str, player_name: str | None = None, player_id:
             except Exception:
                 return None
             market_map = {
-                "REC_3_5":   "player_receptions_over_under",
-                "RUSH_49_5": "player_rushing_yards_over_under",
+                "REC_3_5":   "player_receptions",
+                "RUSH_49_5": "player_rush_yds",
+                "PASS_YDS":  "player_pass_yds",
             }
             market = market_map.get(prop)
             if not market or not player_name:
