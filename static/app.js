@@ -261,27 +261,46 @@ evalBtn.addEventListener("click", async ()=>{
 });
 
 // Top Picks (MLB) — use stricter defaults to surface real edges
+// helpers
+const num = (v, d) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+const leaguePath = l =>
+  ({ mlb:'mlb', nfl:'nfl', nba:'nba', nhl:'nhl', ufc:'ufc' }[(l||'mlb').toLowerCase()] || 'mlb');
+
+function getFilters(){
+  // if you don't have inputs, these defaults are used
+  const limit     = num(document.querySelector('#limit')?.value, 12);
+  const min_edge  = num(document.querySelector('#min-edge')?.value, 0.03);
+  const min_trend = num(document.querySelector('#min-trend')?.value, 0.57);
+  const events    = num(document.querySelector('#events')?.value, 10);
+  return { limit, min_edge, min_trend, events };
+}
+
+// Top Picks — uses the active league
 async function loadTopPicks(){
   clearResults();
   setLoading(true);
   try{
-    const list = await fetchJSON("/api/top/mlb?limit=12&min_edge=0.03&min_trend=0.57&events=10");
-    if(Array.isArray(list) && list.length){
-      for(const p of list) addTopCard(p);
+    const qs   = new URLSearchParams(getFilters()).toString();
+    const path = `/api/top/${leaguePath(currentLeague)}?${qs}`;
+    const res  = await fetchJSON(path);
+    const list = Array.isArray(res) ? res : (res?.data ?? []); // tolerate either shape
+
+    if (list.length){
+      for (const p of list) addTopCard(p);
     } else {
-      addResultCard({title:"No picks", subtitle:"No positive-edge MLB props under current filters.", pTrend:0, breakEven:null, tag:"Fade"});
+      addResultCard({
+        title: "No picks",
+        subtitle: `No positive-edge ${String(currentLeague).toUpperCase()} props under current filters.`,
+        pTrend: 0, breakEven: null, tag: "Fade"
+      });
     }
-  }catch(err){
-    addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
-  }finally{
+  } catch(err){
+    addResultCard({ title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade" });
+  } finally {
     setLoading(false);
   }
 }
-
-// wire top picks button if present
-topBtn?.addEventListener("click", loadTopPicks);
-
-// init
-setPropOptions(currentLeague);
-setLoading(false);
 
