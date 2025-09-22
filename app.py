@@ -152,15 +152,15 @@ def evaluate():
         return jsonify({"error": f"evaluate failed: {type(e).__name__}: {e}"}), 500
 
 # --- Top Picks (MLB): cache-first + background warm (single definition) ---
+# --- Top Picks (MLB): cache-first + background warm ---
 from concurrent.futures import ThreadPoolExecutor
 import threading, time
-from services.odds_fanduel import list_fd_mlb_candidates
+from flask import current_app
 
 _warm_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=3)
 
 def _warm_trends_async(pids):
-    # live fetch to fill cache for next request
     from services.mlb import batter_trends_last10
     uniq = list({int(x) for x in pids if x})
     with _warm_lock:
@@ -169,65 +169,83 @@ def _warm_trends_async(pids):
 
 @app.get("/api/top/mlb")
 def top_mlb():
-    limit         = min(max(int(request.args.get("limit", "12")), 1), 24)
-    max_cands     = min(max(int(request.args.get("max_cands", "40")), 5), 200)
-    budget_s      = float(request.args.get("budget_s", "2.0"))      # quick first paint
-    min_edge      = float(request.args.get("min_edge", "0.02"))
-    min_trend     = float(request.args.get("min_trend", "0.55"))
-    allow_neg     = request.args.get("allow_negative", "0") == "1"
-    events        = max(1, int(request.args.get("events", "8")))
-    per_event_cap = max(5, int(request.args.get("per_event_cap", "20")))
-
-    t0 = time.time()
     try:
-        cands = list_fd_mlb_candidates(max_events=events, per_event_cap=per_event_cap)
+        from services.odds_fanduel import list_fd_mlb_candidates
+        from services.mlb import resolve_player_id, batter_trends_last10_cached
+        from utils.prob import american_to_prob
+
+        limit         = min(max(int(request.args.get("limit", "12")), 1), 24)
+        max_cands     = min(max(int(request.args.get("max_cands", "40")), 5), 200)
+        budget_s      = float(request.args.get("budget_s", "2.0"))      # quick first paint
+        min_edge      = float(request.args.get("min_edge", "0.02"))
+        min_trend     = float(request.args.get("min_trend", "0.55"))
+        allow_neg     = request.args.get("allow_negative", "0") == "1"
+        events        = max(1, int(request.args.get("events", "8")))
+        per_event_cap = max(5, int(request.args.get("per_event_cap", "20")))
+
+        t0 = time.time()
+        # Odds fetch with graceful failure → 502 JSON instead of HTML
+        try:
+            cands = list_fd_mlb_candidates(max_events=events, per_event_cap=per_event_cap)
+        except Exception as e:
+            return jsonify({"error": f"odds fetch failed: {e}"}), 502
+
+        cands = cands[:max_cands]
+        picks, warm_pids = [], []
+
+        for c in cands:
+            if len(picks) >= limit or (time.time() - t0) > budget_s:
+                break
+
+            name = c["player_name"]
+            pid  = resolve_player_id(name)
+            if not pid:
+                continue
+
+            t = batter_trends_last10_cached(pid)  # instant if cached; None if not warmed
+            if t is None:
+                warm_pids.append(pid)
+                continue
+
+            if c["prop"] == "HITS_0_5":
+                p_trend = (t.get("hits_rate") or 0) / 100.0
+                spark   = t.get("hits_series") or []
+            else:
+                p_trend = (t.get("tb2_rate") or 0) / 100.0
+                spark   = t.get("tb2_series") or []
+
+            p_be = american_to_prob(c["american"])
+            if p_be is None:
+                continue
+            edge = p_trend - p_be
+
+            if not allow_neg:
+                if p_trend < min_trend: continue
+                if edge   < min_edge:   continue
+
+            tag = "Fade"
+            if p_trend >= 0.58: tag = "Straight"
+            elif p_trend >= 0.52: tag = "Parlay leg"
+
+            picks.append({
+                "player_id": pid, "player_name": name, "prop": c["prop"],
+                "line": float(c["line"]), "american": float(c["american"]),
+                "break_even_prob": round(p_be, 4), "p_trend": round(p_trend, 4),
+                "edge": round(edge, 4), "tag": tag, "spark": spark
+            })
+
+        if warm_pids:
+            _warm_trends_async(warm_pids)
+
+        picks.sort(key=lambda x: x["edge"], reverse=True)
+        return jsonify(picks[:limit])
+
     except Exception as e:
-        return jsonify({"error": f"odds fetch failed: {e}"}), 502
+        current_app.logger.exception("top_mlb failed")
+        return jsonify({"error": f"top_mlb_failed: {type(e).__name__}: {e}"}), 500
 
-    cands = cands[:max_cands]
-
-    picks, warm_pids = [], []
-    for c in cands:
-        if len(picks) >= limit or (time.time() - t0) > budget_s:
-            break
-        name = c["player_name"]
-        pid  = resolve_player_id(name)
-        if not pid:
-            continue
-
-        t = batter_trends_last10_cached(pid)  # instant if cached; None otherwise
-        if t is None:
-            warm_pids.append(pid)
-            continue
-
-        if c["prop"] == "HITS_0_5":
-            p_trend = (t.get("hits_rate") or 0) / 100.0
-            spark   = t.get("hits_series") or []
-        else:
-            p_trend = (t.get("tb2_rate") or 0) / 100.0
-            spark   = t.get("tb2_series") or []
-
-        p_be = american_to_prob(c["american"])
-        if p_be is None: 
-            continue
-        edge = p_trend - p_be
-
-        if not allow_neg:
-            if p_trend < min_trend: continue
-            if edge   < min_edge:   continue
-
-        picks.append({
-            "player_id": pid, "player_name": name, "prop": c["prop"],
-            "line": float(c["line"]), "american": float(c["american"]),
-            "break_even_prob": round(p_be, 4), "p_trend": round(p_trend, 4),
-            "edge": round(edge, 4),
-            "tag": ("Straight" if p_trend>=0.58 else "Parlay leg" if p_trend>=0.52 else "Fade"),
-            "spark": spark
-        })
-
-    if warm_pids:
-        _warm_trends_async(warm_pids)
-
-    picks.sort(key=lambda x: x["edge"], reverse=True)
-    return jsonify(picks[:limit])
-
+# --- Top Picks (NFL): stub so the NFL tab doesn't 404 ---
+@app.get("/api/top/nfl")
+def top_nfl():
+    # Return empty list (UI shows “No picks”). Replace with real NFL logic later.
+    return jsonify([])
