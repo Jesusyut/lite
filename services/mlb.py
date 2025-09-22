@@ -5,12 +5,29 @@ import os, time, datetime as dt, requests
 from typing import Dict, Any, List, Optional
 
 # ---- cache (uses your cache_ttl if present; falls back to in-proc) ----
+# ---- cache (normalize signature across environments) ----
 try:
-    from cache_ttl import cache_get as _cache_get, cache_set as _cache_set
+    from cache_ttl import cache_get as _raw_cache_get, cache_set as _raw_cache_set
+
+    def _cache_get(key: str):
+        return _raw_cache_get(key)
+
+    def _cache_set(key: str, value, ttl_s: int = 86400):
+        # Try common forms: ttl=, ttl_s positional, or no TTL support
+        try:
+            return _raw_cache_set(key, value, ttl=ttl_s)   # preferred
+        except TypeError:
+            try:
+                return _raw_cache_set(key, value, ttl_s)   # positional as 3rd arg
+            except TypeError:
+                return _raw_cache_set(key, value)          # no TTL available
 except Exception:
-    _MEM: Dict[str, Any] = {}
-    def _cache_get(k: str): return _MEM.get(k)
-    def _cache_set(k: str, v: Any, ttl_s: int = 86400): _MEM[k] = v  # naive fallback
+    # Fallback in-proc cache
+    _MEM = {}
+    def _cache_get(key: str):
+        return _MEM.get(key)
+    def _cache_set(key: str, value, ttl_s: int = 86400):
+        _MEM[key] = value
 
 BASE = "https://statsapi.mlb.com/api/v1"
 TTL_DAY   = int(os.getenv("MLB_CACHE_TTL_S", "86400"))   # 24h
