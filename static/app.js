@@ -303,4 +303,33 @@ async function loadTopPicks(){
     setLoading(false);
   }
 }
+// ensure this is the ONLY place you call setLoading(true/false)
+async function loadTopPicks(){
+  clearResults();
+  setLoading(true);
+  try {
+    const qs   = new URLSearchParams(getFilters()).toString();
+    const path = `/api/top/${leaguePath(currentLeague)}?${qs}`;
+    const res  = await fetchJSON(path);
+    const list = Array.isArray(res) ? res : (res?.data ?? []);
+    if (list.length) list.forEach(addTopCard);
+    else addResultCard({title:"No picks", subtitle:`No positive-edge ${String(currentLeague).toUpperCase()} props under current filters.`, pTrend:0, breakEven:null, tag:"Fade"});
+  } catch (err) {
+    addResultCard({title:"Error", subtitle:String(err.message||err), pTrend:0, breakEven:null, tag:"Fade"});
+  } finally {
+    setLoading(false);
+  }
+}
+
+// fire on tab change AND on Top Picks button click
+let currentLeague = 'mlb';
+document.querySelectorAll('[data-league]').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    currentLeague = btn.dataset.league;
+    setPropOptions(currentLeague);
+    // optional: auto refresh on tab switch
+    // loadTopPicks();
+  });
+});
+topBtn?.addEventListener('click', loadTopPicks);
 
