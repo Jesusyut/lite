@@ -307,4 +307,11 @@ document.addEventListener('DOMContentLoaded', () => {
   setLoading(false);
   loadTopPicks();              // ← loads Top Picks by default
 });
+// in app.js, right after DOMContentLoaded auto-load:
+document.addEventListener('DOMContentLoaded', () => {
+  setLoading(false);
+  loadTopPicks();
+  // auto-retry once after a short delay to pick up warmed cache
+  setTimeout(() => loadTopPicks(), 3500);
+});
 
