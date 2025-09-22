@@ -4,6 +4,16 @@ import os, datetime as dt
 from typing import Dict, Any, List, Optional, Tuple
 import requests
 from utils.rcache import cached_fetch
+# services/mlb.py
+import os
+USE_FREE = os.getenv("MLB_FREE_ENABLED", "1") == "1"
+
+if USE_FREE:
+    # new free provider
+    from services.mlb_free import resolve_player_id, batter_trends_last10
+else:
+    # legacy APISports provider (kept for fallback)
+    from services.mlb_apisports import resolve_player_id, batter_trends_last10  # <-- rename your old file if needed
 
 # -------- Config / TTLs --------
 MLB_TIMEOUT_S = float(os.getenv("MLB_TIMEOUT_S", "8"))
